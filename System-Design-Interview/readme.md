@@ -1,6 +1,6 @@
 # System Design Interview
 
-## Scale from zero to millions of users
+## Chapter 1: Scale from zero to millions of users
 
 ### Singleton web server data flow:
 
@@ -173,6 +173,150 @@ challenges:
 - Scale your data tier by sharding
 - Split tiers into individual services
 - Monitor your system and use automation tools
+
+## Chapter 2: Back of the envelope estimation 信封背面估算
+
+### Latency numbers 延迟数字
+
+![](latency-numbers.jpg)
+
+- Memory is fast but the disk is slow.
+- Avoid disk seeks if possible.
+- Simple compression algorithms are fast.
+- Compress data before sending it over the internet if possible.
+- Data centers are usually in different regions, and it takes time to send data between them.
+
+### Availability numbers
+
+service level agreement (SLA).
+9 越多越好
+![](availability-numbers.jpg)
+
+### Example
+
+Assumptions:
+
+- 300 million monthly active users.
+- 50% of users use Twitter daily.
+- Users post 2 tweets per day on average. - 10% of tweets contain media.
+- Data is stored for 5 years.
+
+Estimations:
+
+Query per second (QPS) estimate:
+
+- Daily active users (DAU) = 300 million * 50% = 150 million
+- Tweets QPS = 150 million * 2 tweets / 24 hour / 3600 seconds = ~3500
+- Peak QPS = 2 * QPS = ~7000
+
+We will only estimate media storage here.
+
+- Average tweet size:
+- tweet_id 64 bytes
+- text 140 bytes - media 1 MB
+- Media storage: 150 million * 2 * 10% * 1 MB = 30 TB per day 30,000,000 MB
+- 5-year media storage: 30 TB * 365 * 5 = ~55 PB
+
+## Chapter 3: A framework for system design interview
+
+- The problem is open-ended, 开发式的
+- and there is no perfect answer. 没有标准答案
+- The final design is less important compared to the work you put in the design process. 设计的过程很重要
+- This allows you to demonstrate your design skill, 展示设计技能
+- defend your design choices, 为设计选型辩护，为什么好，为什么适合
+- and respond to feedback in a constructive manner.
+
+面试者需要展示的是：
+
+- technical design skills. 设计技能只是一小部份
+- a person's ability to collaborate, 合作能力
+- to work under pressure, 抗压能力
+- and to resolve ambiguity constructively. 建设性地解决模棱两可的问题
+- The ability to ask good questions 问正确而高效的问题
+
+red flags：
+
+- Over-engineering 过度设计
+- delight in design purity
+- and ignore tradeoffs. 忽略折中
+- unaware of the compounding costs of over-engineered systems 不考虑综合承包
+- narrow mindedness, 钻牛角尖
+- stubbornness 顽固
+
+### 4 setps
+
+#### Step 1 - Understand the problem and establish design scope. 需要全面理解问题，并了解设计的范围, 3-10 minutes
+
+Answering without a thorough understanding of the requirements is a huge red flag.  
+Slow down. Think deeply and ask questions to clarify requirements and assumptions. This is extremely important.
+澄清需求和猜想。
+
+- ask the right questions, 用于提问
+	- What specific features are we going to build? 具体的功能点
+	- How many users does the product have? 用户量
+	- How fast does the company anticipate to scale up?
+	- What are the anticipated scales in 3 months, 6 months, and a
+	  year? 预期规模的增幅
+	- What is the company’s technology stack? 当前公司的技术栈
+	- What existing services you might leverage to simplify the design? 有哪些现有的服务模块
+- make the proper assumptions,
+	- write down your assumptions on the whiteboard or paper. You might need them later. 写下猜想，以备后用。
+- and gather all the information needed to build a system
+
+#### Step 2 - Propose high-level design and get buy-in, 提出一个高层的笼统的设计并买进, 10-15 minutes
+
+- Come up with an initial blueprint for the design. Ask for feedback. 把面试官当作队友，一起合作
+- Draw box diagrams with key components on the whiteboard or paper. 画框图
+  This might include:
+	- clients (mobile/web),
+	- APIs,
+	- web servers,
+	- data stores,
+	- cache,
+	- CDN,
+	- message queue, etc.
+- Do back-of-the-envelope calculations to evaluate if your blueprint fits the scale constraints. 评估设计蓝图是否满足扩容限制。
+- go through a few concrete use cases 过一遍具体的用户实例，发现边缘实例 edge case
+- 是否需要 API endpoints and database schema，得看具体设计题目，或者问面试官
+
+#### Step 3 - Design deep dive, 深入的设计， 10-25 minutes
+
+You shall work with the interviewer to identify and prioritize components in the architecture.
+该着重剖析高优先级的组件模块了
+
+- Design the most critical components first.
+- system performance characteristics,
+	- likely focusing on the bottlenecks 系统瓶颈
+	- and resource estimations 所需资源估算
+- dig into details of some system components.
+	- URL shortener -> hash function design
+	- chat system -> how to reduce latency and how to support online/offline status
+- Try not to get into unnecessary details. Time management
+
+发布新帖子
+![](publish.jpg)
+
+订阅朋友圈更新
+![](subscribe.jpg)
+
+#### Step 4 - Wrap up, 打包结束， 3-5 minutes
+
+- The interviewer might want you to identify the system bottlenecks and discuss potential improvements. critical
+  thinking 可以改进的地方
+- It could be useful to give the interviewer a recap of your design. 总结
+- Error cases (server failure, network loss, etc.)  错误实例：服务器错误，网络抖动
+- monitor metrics and error logs 监控指标，错误日志审查
+- How to roll out the system? 如何部署系统
+- How to handle the next scale curve 如何为下一次系统扩容做准备，例如100万用户到1000万用户。
+
+### Conclusion
+
+- Don’t go into too much detail on a single component in the beginning. Give the high-level design first then drills
+  down.
+- If you get stuck, don't hesitate to ask for hints.
+- Again, communicate. Don't think in silence.
+- Don’t think your interview is done once you give the design. You are not done until your interviewer says you are
+  done. Ask for feedback early and often.
 
 ## References
 
