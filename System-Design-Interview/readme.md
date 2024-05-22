@@ -312,11 +312,247 @@ You shall work with the interviewer to identify and prioritize components in the
 ### Conclusion
 
 - Don’t go into too much detail on a single component in the beginning. Give the high-level design first then drills
-  down.
-- If you get stuck, don't hesitate to ask for hints.
-- Again, communicate. Don't think in silence.
+  down. 开头先不要过于深入某一模块的细节，先给个高层次设计，然后再挑重点的模块深入讲。
+- If you get stuck, don't hesitate to ask for hints. 如果卡住了，大方的请求面试官给予提示。
+- Again, communicate. Don't think in silence. 多交流，不要沉默。
 - Don’t think your interview is done once you give the design. You are not done until your interviewer says you are
-  done. Ask for feedback early and often.
+  done. Ask for feedback early and often. 面试官说结束才是结束了，持续的问反馈。
+
+## Chapter 4: Design a rate limiter 限速器
+
+In a network system, a rate limiter is used to control the rate of traffic sent by a client or a service.
+In the HTTP world, a rate limiter limits the number of client requests allowed to be sent over a specified period.
+If the API request count exceeds the threshold(门槛) defined by the rate limiter, all the excess(额外的) calls are
+blocked.
+
+benefit:
+
+- Prevent resource starvation(饥饿) caused by Denial of Service (DoS) attack
+- Twitter limits the number of tweets to 300 per 3 hours.
+- Google docs APIs have the following default limit: 300 per user per 60 seconds for read requests
+- Reduce cost.
+- Prevent servers from being overloaded.
+
+## Steps
+
+### Step 1 - Understand the problem and establish design scope
+
+需要澄清的问题：
+
+- client-side or server-side，一般是服务端，客户端很容易被绕过。
+- throttle based on IP or user ID 一般是基于 IP 进行限流
+- 系统的规模 startup or big company
+- 是否是分布式环境 distrubuted environment
+- separate service or implemented in application code 是否是单独的服务模块，还是继承到业务模块
+- inform users who are throttled 是否通知被限速的用户？
+- accurately limit excessive requests 精确的限制过多的请求
+- low latency 低延迟，不能拖慢正常的 HTTP 响应时间
+- 限速器尽可能降低所需的额外资源，例如内存
+- distributed rate limiting 限速器可以跨服务器，或者跨进程进行分享共用。
+- Exception handling 当用户被限速了，给予清晰的错误提示。
+- High fault tolerance 高容错，挂了不影响整个系统
+
+### Step 2 - Propose high-level design and get buy-in
+
+HTTP 429 response status code indicates a user has sent too many requests.
+
+API gateway is a fully managed service that supports
+
+- rate limiting, 限速器
+- SSL termination, 强制重定向到 HTTPS
+- authentication, 鉴权
+- IP whitelisting, IP白名单
+- servicing static content 提供静态资源服务
+
+#### Where to place the rate limiter:
+
+- server-side
+- gateway in microservice architecture
+- client-side
+
+example:
+
+- Go Gin:
+	- 集成在业务逻辑里面的限速器，在 Gin 框架中，限制用户端发送短信验证码次数：
+	  [rate-limiter-for-sms-by-redis](rate-limiter-for-sms-by-redis.go)
+	- 集成在 Gin 的 middleware 中，用 goroutine 控制时间
+	  [rate-limiter-by-goroutine](rate-limiter-by-goroutine.go)
+	- 第三方包：
+		- gin-ratelimit: (https://github.com/khaaleoo/gin-rate-limiter)
+		- limiter: (https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)
+- Python Django
+	- Django REST framework (DRF) 'pip install djangorestframework'
+	- django-ratelimit middleware
+
+#### Algorithms for rate limiting
+
+- token bucket
+- leaking bucket
+- fixed window counter
+- sliding window log
+- sliding window counter
+
+##### Token bucket algorithm 令牌桶算法
+
+- A token bucket is a container that has pre-defined capacity. Tokens are put in the bucket at preset rates
+  periodically. Once the bucket is full, no more tokens are added. 令牌桶有额定容量，周期性往里面放令牌，桶满了就不放。
+- Each request consumes one token 每个请求都要消耗一个令牌，令牌被取光了之后请求就被舍弃。
+	- If there are enough tokens, we take one token out for each request, and the request goes through.
+	- If there are not enough tokens, the request is dropped.
+
+refer to [token_bucket.py](token_bucket.py)
+
+Pros:
+
+- The algorithm is easy to implement.
+- Memory efficient.
+- Token bucket allows a burst of traffic for short periods. A request can go through as long as there are tokens left.
+  容许短时间段内出现一股高峰请求
+
+Cons:
+
+- Two parameters in the algorithm are bucket size and token refill rate. However, it might be challenging to tune them
+  properly.
+
+##### Leaking bucket algorithm 漏桶算法
+
+The leaking bucket algorithm is similar to the token bucket except that requests are processed at a fixed rate. It is
+usually implemented with a first-in-first-out (FIFO) queue. 请求是固定的速度，把请求放入队列中，先入先出。
+
+- When a request arrives, the system checks if the queue is full. If it is not full, the request is added to the queue.
+  队列没有满的话，把请求放入队列中。
+- Otherwise, the request is dropped. 如果队列满的话，舍弃这个请求。
+- Requests are pulled from the queue and processed at regular intervals. 消费者周期性的从队列中取出请求，并执行。
+
+example refer to [leakying_bucket.py](leakying_bucket.py)
+
+Pros:
+
+- Memory efficient given the limited queue size.
+- Requests are processed at a fixed rate therefore it is suitable for use cases that a stable outflow rate is needed.
+  固定速度。
+
+Cons:
+
+- A burst of traffic fills up the queue with old requests, and if they are not processed in time, recent requests will
+  be rate limited. 如果出现一股请求峰的话，并且消费者没有及时处理，会对新请求限速。
+- There are two parameters in the algorithm. It might not be easy to tune them properly.
+
+##### Fixed window counter algorithm 固定窗口计数算法
+
+- The algorithm divides the timeline into fix-sized time windows and assign a counter for each window.
+  划分固定的时间窗口，并给每一个窗口分配最大请求处理数门槛。
+- Each request increments the counter by one. 时间段内每个请求增加一次计数。
+- Once the counter reaches the pre-defined threshold, new requests are dropped until a new time window starts.
+  如果时间段内计数达到了设定的门槛，那么新请求将被舍弃直到新的时间窗口到来。
+
+refer to [fixed_window_counter.py](fixed_window_counter.py)
+
+Pros:
+
+- Memory efficient.
+- Easy to understand.
+- Resetting available quota at the end of a unit time window fits certain use cases.
+
+Cons:
+
+- Spike in traffic at the edges of a window could cause more requests than the allowed quota to go through.
+  这种固定时间窗口，不是均匀的。如果临界区的请求多的话，会导致相邻的临界区组成的时间窗口的请求数超过额定值。
+  例如 时间窗口是 1 分钟，额定请求数是 5，划分的固定时间窗口是 1:00-2:00，2:00-3:00。如果 1:30-2:00 和 2:00-2:30 区间内的请求数各是
+  5。
+  那么 1:30-2:30 这个 1 分钟内的请求数就是 10 了，是额定值的两倍。
+
+##### Sliding window log algorithm 滑动窗口日志算法
+
+As discussed previously, the fixed window counter algorithm has a major issue:
+it allows more requests to go through at the edges of a window.
+The sliding window log algorithm fixes the issue. 为了解决'固定时间窗口算法'而设计的'滑动时间窗口算法'。
+
+- The algorithm keeps track of request timestamps. Timestamp data is usually kept in cache, such as sorted sets of
+  Redis. 追踪请求时间戳，存储在缓存中。
+- When a new request comes in, remove all the outdated timestamps. Outdated timestamps are defined as those older than
+  the start of the current time window. 新请求到来之时，删除所有过期的时间戳（比当前时间窗口开始时间戳还早的）
+- Add timestamp of the new request to the log.
+- If the log size is the same or lower than the allowed count, a request is accepted. Otherwise, it is rejected.
+
+refer to [sliding_window_log.py](sliding_window_log.py)
+
+Pros:
+
+- Rate limiting implemented by this algorithm is very accurate. In any rolling window, requests will not exceed the rate
+  limit.
+
+Cons:
+
+- The algorithm consumes a lot of memory because even if a request is rejected, its timestamp might still be stored in
+  memory.
+
+##### Sliding window counter algorithm 滑动窗口计数算法
+
+The sliding window counter algorithm is a hybrid approach that combines the fixed window counter and sliding window log.
+'滑动窗口计数算法'是 '固定窗口计数'和 '滑动窗口日志' 算法的混合
+
+refer to [sliding_window_counter.py](sliding_window_counter.py)
+
+Pros
+
+- It smooths out spikes in traffic because the rate is based on the average rate of the previous window.
+- Memory efficient.
+
+Cons
+
+- It only works for not-so-strict look back window. It is an approximation of the actual rate because it assumes
+  requests in the previous window are evenly distributed.
+
+### Step 3 - Design deep dive
+
+- How are rate limiting rules created? Where are the rules stored?
+  configuration, stored on disk
+- How to handle requests that are rate limited?
+	- return 429
+	- enqueue and process later 存到队列中，晚一点执行。
+	- HTTP 头返回剩余次数，用于告警用户。
+		- X-Ratelimit-Remaining 时间窗口内剩余次数
+		- X-Ratelimit-Limit 时间窗口内限定的总次数
+		- X-Ratelimit-Retry-After 超出次数之后，提示多久再试
+
+#### Detailed design
+
+- Rules are stored on the disk. Workers frequently pull rules from the disk and store them in the cache.
+  规则存储在磁盘上，定期读取规则变更，并更新到程序的缓存中。
+- When a client sends a request to the server, the request is sent to the rate limiter middleware first.
+  中间件先过滤请求。
+- Rate limiter middleware loads rules from the cache. It fetches counters and last request timestamp from Redis cache.
+  Based on the response, the rate limiter decides: 限速器中间件从缓存中加载规则，用于判断。
+	- if the request is not rate limited, it is forwarded to API servers.
+	- if the request is rate limited, the rate limiter returns 429 too many requests error to the client.
+	  In the meantime, the request is either dropped or forwarded to the queue. 触发限速条件后，返回 429
+	  给客户端，同时丢弃请求，或者把请求存到队列中，以备后处理。
+
+#### Rate limiter in a distributed environment 分布式系统中如何部署限速器
+两个挑战点：
+- Race condition 竞争条件，多线程并发读取共同的资源，例如 counter。临界区导致多放行请求。
+  - 加锁
+  - Lua script 提升 Redis Check-and-set(CAS) 慢的缺点
+- Synchronization issue 同步数据问题，由于web层是无状态的，多个限速器需要同步限速的数据，以控制客户端。
+  - sticky sessions 粘性的session
+  - use centralized data stores like Redis. 数据共享在 Redis 中
+#### Performance optimization
+- multi-data center
+- synchronize data with eventual consistency 同步数据，保证最终一致性
+#### Monitoring
+- The rate limiting algorithm is effective. 
+-  The rate limiting rules are effective.
+### Step 4 - Wrap up
+- Hard vs soft rate limiting.
+  - Hard: The number of requests cannot exceed the threshold. 
+  - Soft: Requests can exceed the threshold for a short period.
+- Rate limiting at different levels. Open systems interconnection model(OSI model) 7 layers.
+for example: Iptables(IP layer)
+
+
+
+
 
 ## References
 
