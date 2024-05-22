@@ -333,7 +333,6 @@ benefit:
 - Reduce cost.
 - Prevent servers from being overloaded.
 
-## Steps
 
 ### Step 1 - Understand the problem and establish design scope
 
@@ -356,7 +355,7 @@ benefit:
 
 HTTP 429 response status code indicates a user has sent too many requests.
 
-API gateway is a fully managed service that supports
+API gateway is a fully managed service that supports:
 
 - rate limiting, 限速器
 - SSL termination, 强制重定向到 HTTPS
@@ -530,29 +529,78 @@ Cons
 	  给客户端，同时丢弃请求，或者把请求存到队列中，以备后处理。
 
 #### Rate limiter in a distributed environment 分布式系统中如何部署限速器
+
 两个挑战点：
+
 - Race condition 竞争条件，多线程并发读取共同的资源，例如 counter。临界区导致多放行请求。
-  - 加锁
-  - Lua script 提升 Redis Check-and-set(CAS) 慢的缺点
+	- 加锁
+	- Lua script 提升 Redis Check-and-set(CAS) 慢的缺点
 - Synchronization issue 同步数据问题，由于web层是无状态的，多个限速器需要同步限速的数据，以控制客户端。
-  - sticky sessions 粘性的session
-  - use centralized data stores like Redis. 数据共享在 Redis 中
+	- sticky sessions 粘性的session
+	- use centralized data stores like Redis. 数据共享在 Redis 中
+
 #### Performance optimization
+
 - multi-data center
 - synchronize data with eventual consistency 同步数据，保证最终一致性
+
 #### Monitoring
-- The rate limiting algorithm is effective. 
--  The rate limiting rules are effective.
+
+- The rate limiting algorithm is effective.
+- The rate limiting rules are effective.
+
 ### Step 4 - Wrap up
+
 - Hard vs soft rate limiting.
-  - Hard: The number of requests cannot exceed the threshold. 
-  - Soft: Requests can exceed the threshold for a short period.
+	- Hard: The number of requests cannot exceed the threshold.
+	- Soft: Requests can exceed the threshold for a short period.
 - Rate limiting at different levels. Open systems interconnection model(OSI model) 7 layers.
-for example: Iptables(IP layer)
+  for example: Iptables(IP layer)
 
+## Chapter 5: Design consistent hashing 一致性hash
 
+分布式服务器，负载均衡器如果使用 '取模%' 运算，可以满足，但是有缺点：
 
+- 服务器数量得固定
+- key 的分布得平均
+- 如果扩容或者缩容服务器池，会产生几乎所有 key 的数据迁移的问题(remapping)，降低效率。
 
+一致性 hash 可以在增加和减少服务器节点时候，只影响部分 key 的迁移
+
+Consistent hashing is a special kind of hashing such that when a hash table is re-sized and consistent hashing is used,
+only k/n keys need to be remapped on average, where k is the number of keys, and n is the number of slots.
+
+- hash space and hash ring
+  SHA-1(Secure Hash Algorithms): 0 to 2^160 - 1
+	- SHA-1
+	  Released in 1995, SHA-1 was previously used for cryptographic purposes like digital signatures and certificate
+	  generation. However, it's no longer considered secure enough to meet today's cybersecurity standards.
+	- SHA-2
+	  Developed shortly after SHA-1 became vulnerable to brute force attacks, SHA-2 is a family of two similar hash
+	  functions with different block sizes: SHA-256 and SHA-512.
+	- SHA-3
+	  Adopted in 2015, SHA-3 is the successor to the SHA-2 algorithms but hasn't gained much popularity due to their
+	  efficiency and security.
+    - CRC (Cyclic Redundancy Check). It calculates a fixed-size checksum based on the data.
+    - MD5 (Message Digest 5)
+- Hash servers
+  把服务器 hash 到环上，可以基于 IP，名称等。using a uniformly distributed hash function.
+- Hash keys
+  把 key hash 到环上。using a uniformly distributed hash function.
+- server lookup
+  从 key 所在位置出发，顺时针方向寻找，遇到的第一个 server，就是这个 key 应该存放的服务器。
+- 增加和删除服务器节点，只会影响部分 key
+
+The consistent hashing algorithm was introduced by Karger et al. at MIT
+
+问题：
+
+- 无法保证每个服务器均匀分布在环上，这样才能均匀的负载数据。the size of partition
+	- 引入虚拟服务器节点
+
+As the number of virtual nodes increases, the distribution of keys becomes more balanced.
+This is because the standard deviation(偏离，误差) gets smaller with more virtual nodes, leading to balanced data
+distribution.
 
 ## References
 
