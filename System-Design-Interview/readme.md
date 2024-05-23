@@ -333,7 +333,6 @@ benefit:
 - Reduce cost.
 - Prevent servers from being overloaded.
 
-
 ### Step 1 - Understand the problem and establish design scope
 
 需要澄清的问题：
@@ -581,8 +580,8 @@ only k/n keys need to be remapped on average, where k is the number of keys, and
 	- SHA-3
 	  Adopted in 2015, SHA-3 is the successor to the SHA-2 algorithms but hasn't gained much popularity due to their
 	  efficiency and security.
-    - CRC (Cyclic Redundancy Check). It calculates a fixed-size checksum based on the data.
-    - MD5 (Message Digest 5)
+	- CRC (Cyclic Redundancy Check). It calculates a fixed-size checksum based on the data.
+	- MD5 (Message Digest 5)
 - Hash servers
   把服务器 hash 到环上，可以基于 IP，名称等。using a uniformly distributed hash function.
 - Hash keys
@@ -601,6 +600,217 @@ The consistent hashing algorithm was introduced by Karger et al. at MIT
 As the number of virtual nodes increases, the distribution of keys becomes more balanced.
 This is because the standard deviation(偏离，误差) gets smaller with more virtual nodes, leading to balanced data
 distribution.
+
+## Chapter 6: Design a key-value store
+
+- key must be unique key要唯一性，不能有重复
+- Keys can be plain text or hashed values key是纯文本，或者 hash 值
+- a short key works better 短的 key 效率更高
+
+### Understand the problem and establish design scope
+
+- balance between read, write and memory usage 在读，写性能，内存用量 之间平衡
+- tradeoff between consistency and availability 在高一致性和高可用性之间权衡
+
+example:
+
+- The size of a key-value pair is small: less than 10 KB.
+- Ability to store big data. 可以存大数据，那不就和第一点矛盾么？
+- High availability: The system responds quickly, even during failures. 高可用
+- High scalability: The system can be scaled to support large data set. 高扩展性
+- Automatic scaling: The addition/deletion of servers should be automatic based on traffic. 自动扩展
+- Tunable consistency. 一致性的参数可以微调整的。
+- Low latency. 低延迟性
+
+### Single server key-value store
+
+- hash table 数据存在内存中
+	- 压缩数据 data compression
+	- 经常访问的数据存在内存中，不经常的存在磁盘上。
+
+### Distributed key-value store
+
+CAP (Consistency 一致性, Availability 可用性, Partition Tolerance 分割容忍性) theorem 定理.
+CAP theorem states it is impossible for a distributed system to simultaneously provide more than two of these three
+guarantees
+
+- Consistency: consistency means all clients see the same data at the same time no matter which node they connect to.
+  任何节点访问到的数据，都是一样的。
+- Availability: availability means any client which requests data gets a response even if some of the nodes are down.
+  即使有节点掉线，也能保证总体集群的可用性
+- Partition Tolerance: a partition indicates a communication break between two nodes 节点之间通信被阻隔，无法同步节点上数据.
+  Partition tolerance means the system continues to operate despite network partitions 即使网络阻隔，系统仍然照常运转.
+
+Since network failure is unavoidable, a distributed system must tolerate network partition. Thus, a CA system cannot
+exist in real-world applications. 网络错误不可避免，分布式系统一定要容忍网络阻隔错误，所以丢弃P 而保证 CA 的应用不存在。
+
+CP 强调一致性，牺牲可用性，例如 银行系统
+
+AP 强调可用性，提供读，即使读到的数据是过期的，提供写，等到掉线节点上线之后再进行同步。
+
+### System components
+
+- Data partition 数据分区
+- Data replication 数据复制
+- Consistency 一致性
+- Inconsistency resolution 不一致性解决方法
+- Handling failures 错误恢复
+- System architecture diagram 系统架构图
+- Write path 写路径
+- Read path 读路径
+
+#### Data partition
+
+challenges:
+
+- Distribute data across multiple servers evenly. 使数据均匀的分布在多台服务器上
+- Minimize data movement when nodes are added or removed. 当有节点下线或者新增节点时候，最小化的移动已有的数据
+
+一致性hash 解决以上问题，优点：
+
+- auto scaling 自动扩展
+- heterogeneity 异质性，每个服务器权重可以不一样，容量大的分配多个虚拟节点
+
+#### Data replication 数据复制
+
+- after a key is mapped to a position on the hash ring, walk clockwise from that position and choose the first N servers
+  on the ring to store data copies. 一个新的 key 值存储之后，从该环上的位置出发，沿着 hash 环顺时针方向，选择前 n
+  个服务器来冗余存储这个 key 的值
+
+- we only choose unique servers while performing the clockwise walk logic. 为了避免选到虚拟节点，导致备份的物理服务器少于
+  n，跳过虚拟节点进行复制。
+
+- 数据节点存在不同地理位置的数据中心，数据中心之间用高速网络连接。
+
+#### Consistency
+
+Quorum consensus 法定多数投票 can guarantee consistency for both read and write operations.
+
+- N = The number of replicas 节点数
+- W = A write quorum of size W. For a write operation to be considered as successful, write operation must be
+  acknowledged from W replicas. 向一个节点写入数据之后，收到超过 W 个节点肯定回应，才能代表这次写是有效的。
+- R = A read quorum of size R. For a read operation to be considered as successful, read operation must wait for
+  responses from at least R replicas. 向一个节点读取数据，收到超过 R 个节点的肯定回应，才能代表这次读的数据是真实的。因为可能会有同步不及时问题
+
+A coordinator 协调者 acts as a proxy between the client and the nodes. 协调者按照以上方法用来协调每一次读和写的有效性。
+
+The configuration of W, R and N is a typical tradeoff between latency and consistency.
+R 与 W 大小的设置应该考虑到系统对延迟与一致性的折中。
+
+- 如果 R=1 W=1，那么延迟就很低，但是一致性无法高保障，因为协调器只需要等一个其他节点的回应，就确认本次操作了。
+- 如果 R>1 W>1，那么一致性可以更好的保障，但是延迟就会高。协调器可能要等到一个最慢的节点的回应。
+- If W + R > N, strong consistency is guaranteed because there must be at least one overlapping node that has the latest
+  data to ensure consistency.
+- If R = 1 and W = N, the system is optimized for a fast read. 快速的读
+- If W = 1 and R = N, the system is optimized for fast write. 快速的写
+- If W + R > N, strong consistency is guaranteed (Usually N = 3, W = R = 2).
+- If W + R <= N, strong consistency is not guaranteed.
+
+- Strong consistency: any read operation returns a value corresponding to the result of the most updated write data
+  item. A client never sees out-of-date data. 高一致性保证任何一次读到的数据是最新的。
+- Weak consistency: subsequent read operations may not see the most updated value. 低一致性可能读到的数据不是最新的
+- Eventual consistency: this is a specific form of weak consistency. Given enough time, all updates are propagated, and
+  all replicas are consistent. 最终一致性，低一致性的一种。保证最终会同步更新数据。
+
+Strong consistency is usually achieved by forcing a replica not to accept new reads/writes until every replica has
+agreed on current write. This approach is not ideal for highly available systems because it could block new operations.
+
+#### Inconsistency resolution: versioning 标注版本
+
+versioning system -> reconcile 和解
+vector clock 向量时钟 [server, version]
+
+````
+D1[S1,1] -> D2[S1,2] -> | -> D3([S1,2],[S2,1]) server2 改了       -> |
+			| -> D4([S1,2],[S3,1]) 同时 server3 也改了 -> | -> D5([S1,3],[S2,1],[S3,1]) reconciled by server1
+````
+
+you can tell that a version X is a sibling (i.e., a conflict exists) of Y if there is any participant in Y's vector
+clock who has a counter that is less than its corresponding counter in X. For example, the following two vector clocks
+indicate there is a conflict: D([s0, 1], [s1, 2]) and D([s0, 2], [s1, 1]).
+如果有某个数据某个版本号大于响应的另一个节点上，同时有其他版本号小于那个节点上，那么就是有冲突了。
+
+缺点：
+
+- First, vector clocks add complexity to the client because it needs to implement conflict resolution logic. 增加复杂度
+- Second, the [server: version] pairs in the vector clock could grow rapidly. 版本号增长速度迅猛，删除老版本号解决。
+
+#### Handling failures
+
+##### failure detection 侦测错误
+
+gossip protocol. 检测到某个服务器下线，需要多个服务器共同确认
+
+- Each node maintains a node membership list, which contains member IDs and heartbeat counters.
+  每个节点维护一个 成员节点列表，（id， counter）
+- Each node periodically increments its heartbeat counter. 每个节点周期性增加心跳计数
+- Each node periodically sends heartbeats to a set of random nodes, which in turn propagate to another set of nodes.
+  每个节点周期性的发送心跳到其他随机的节点
+- Once nodes receive heartbeats, membership list is updated to the latest info.
+  节点收到其他服务器的心跳之后，更新自己的 成员列表。
+- If the heartbeat has not increased for more than predefined periods, the member is considered as offline.
+  如果某个节点的心跳计数长时间不增加，那说明这个节点掉线了。至于是多久算长时间，可以自定义。
+	- Node s0 notices that node s2’s (member ID = 2) heartbeat counter has not increased for a long time.
+	- Node s0 sends heartbeats that include s2’s info to a set of random nodes.
+	- Once other nodes confirm that s2’s heartbeat counter has not been updated for a long time,
+	- node s2 is marked down, and this information is propagated to other nodes.
+	  例如 Sever1 发现 server2 的counter 好久不增加了，它把 server2的心跳数据 发给其他服务器节点，如果得到肯定的答复，
+	  那么把 server2 标记为下线，并同步这条消息到其他节点，使集群直到 server2 下线了。
+
+##### handling temporary failure
+
+"sloppy 邋遢的 懒散的 quorum 法定人数" is used to improve availability.
+
+Instead of enforcing the quorum requirement, the system chooses the first W healthy servers for writes and first R
+healthy servers for reads on the hash ring. Offline servers are ignored.
+在环上，选择前 W 个健康的节点来处理写操作，前 R 个健康的节点来处理读操作
+
+If a server is unavailable due to network or server failures, another server will process requests temporarily. When
+the down server is up, changes will be pushed back to achieve data consistency. This process is called hinted handoff.
+如果一个节点挂了，其他节点临时接手处理请求，当节点恢复之后，修改的数据会推送到该节点，以维持一致性。 提示性的接力
+
+##### Handling permanent failures
+
+implement an anti-entropy 反熵 protocol to keep replicas in sync.
+
+- Anti-entropy involves comparing each piece of data on replicas
+- and updating each replica to the newest version.
+- A Merkle tree（是一个二叉树） is used for inconsistency detection and minimizing the amount of data transferred.
+  Divide key space into buckets 把key空间分成一个个桶，每个桶里面最大容纳 n 个 key。用统一的 hash 函数给每个桶里面的数据计算
+  hash，基于这些 hash 再给 桶 bucket 计算 hash
+  根节点计算的 hash 包括所有子节点的hash信息，如果子节点变化了，它的hash就会变，同时根节点的 hash也会变化。
+  那么只需要比较根节点就可以直到两个树是否相等。对写不友好，对读友好。
+  如果根节点不一样，再比较两个子节点，以此类推递归找到不同的子节点，并同步更新它们。
+  因此可以成比例的同步不同的数据，而不是整个bucket的数据。
+
+#### system architecture
+
+- Clients communicate with the key-value store through simple
+  APIs: get(key) and put(key, value).
+- A coordinator is a node that acts as a proxy between the client
+  and the key-value store.
+- Nodes are distributed on a ring using consistent hashing.
+- The system is completely decentralized so adding and moving nodes can be automatic.
+- Data is replicated at multiple nodes.
+- There is no single point of failure as every node has the same set of responsibilities.
+
+#### write path
+
+1. The write request is persisted on a commit log file.
+2. Data is saved in the memory cache.
+3. When the memory cache is full or reaches a predefined threshold, data is flushed to SSTable on disk.
+   Note: A sorted-string table (SSTable) is a sorted list of <key, value> pairs.
+
+#### Read path
+
+After a read request is directed to a specific node, it first checks if data is in the memory cache.
+If the data is not in memory, it will be retrieved from the disk instead. We need an efficient way to find out which
+SSTable contains the key. Bloom filter is commonly used to solve this problem.
+
+redis 4 中引入了 布隆过滤器，用于判断某个 key 是否存在。当布隆过滤器说某个值存在时，这个值可能不存在；当它说不存在时，那就肯定不存在。
+
+### summary
+![](summary-key-value-store.jpg)
 
 ## References
 
