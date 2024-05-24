@@ -813,7 +813,193 @@ bloomfilter 把某个值的存在与否映射到一个二进制的列表中，�
 参考 [bloom_filter.py](bloom_filter.py)
 
 ### summary
+
 ![](summary-key-value-store.jpg)
+
+## Chapter 7: Design a unique ID generator in distributed systems
+
+### Step 1 - Understand the problem and establish design scope
+
+```
+Candidate: What are the characteristics of unique IDs? 
+Interviewer: IDs must be unique and sortable. 唯一性和可排序性
+Candidate: For each new record, does ID increment by 1? 
+Interviewer: The ID increments by time but not necessarily only increments by 1. 随着时间自增，但不一定自增1
+IDs created in the evening are larger than those created in the morning on the same day. 晚上的增幅可以比早上的大
+Candidate: Do IDs only contain numerical values? 
+Interviewer: Yes, that is correct. 只包含数字
+Candidate: What is the ID length requirement? 
+Interviewer: IDs should fit into 64-bit. 最长不超过64 位
+Candidate: What is the scale of the system?
+Interviewer: The system should be able to generate 10,000 IDs per second. 一秒可以生成 1 万个 ID
+```
+
+### Step 2 - Propose high-level design and get buy-in
+
+- Multi-master replication 多主备份
+- Universally unique identifier (UUID) 全局唯一的ID
+- Ticket server
+- Twitter snowflake 雪花 approach
+
+#### Multi-master replication
+
+MySQL Server1： 1，3，5……
+MySQL Server2： 2，4，6……
+auto_increment=True, increase by k, k 是服务器数目，避免冲突
+
+drawback 缺点：
+
+- Hard to scale with multiple data centers. 多数据中心情况下，不好扩容。例如以上集群增加一个 MySQL server。
+- IDs do not go up with time across multiple servers.
+- It does not scale well when a server is added or removed.
+
+#### UUID
+
+A UUID is another easy way to obtain unique IDs. UUID is a 128-bit number used to identify information in computer
+systems.
+
+##### 几个不同版本的 UUID 之间的区别 UUID -> UUID5
+
+1. Version 1 (Time-based UUID):
+
+- Generation: Uses a timestamp, a clock sequence number (to handle multiple UUIDs generated within the same
+  millisecond),
+  and the MAC address (or another identifier) of the machine generating the UUID. 基于主机的 MAC 地址，系统时间戳生成。
+- Pros: Guarantees uniqueness across machines if the clock remains synchronized, and potentially encodes creation time.
+  如果各个机器的时间是同步一致的话，可以保证唯一性，但是不太容易实现。
+- Cons: Relies on a functioning network card and potentially reveals the MAC address. Not recommended for
+  privacy-sensitive applications.
+
+2. Version 2 (DCE or POSIX UUID, with Namespace Variant):
+
+- Generation: Uses a combination of a namespace UUID (identifies a specific domain or application) and a random value.
+  基于命名空间和随机值。
+- Pros: Provides a way to group related UUIDs within a namespace.
+- Cons: Requires pre-defined namespace UUIDs and doesn't guarantee uniqueness across namespaces. 不保证跨命名空间的唯一性
+
+3. Version 3 (MD5-based UUID):
+
+- Generation: Creates a UUID by hashing a namespace UUID and a name using the MD5 hashing algorithm.
+  基于 UUID2 的 hash 值。使用的是 MD5 hash 算法。
+- Pros: Deterministic 决定论的 generation based on a specific namespace and name. Useful for consistent identifiers
+  within a
+  controlled environment.
+- Cons: MD5 is considered cryptographically weak and vulnerable to collisions (different inputs generating the same
+  hash).
+  Not recommended for security-sensitive applications.
+
+4. Version 4 (Random UUID):
+
+- Generation: Generates a completely random UUID using a pseudo-random 假的随机 number generator.
+- Pros: Most common version due to its simplicity and high likelihood of uniqueness. No dependencies on other
+  identifiers or namespaces.
+- Cons: Doesn't encode any additional information like creation time or namespace.
+
+5. Version 5 (SHA-1-based UUID):
+
+- Generation: Similar to version 3, but uses the SHA-1 hashing algorithm instead of MD5.
+- Pros: More secure than version 3 due to the stronger SHA-1 algorithm.
+- Cons: SHA-1 is also considered cryptographically weak by some security standards. Use with caution in
+  security-critical applications.
+
+##### 采用 UUID 作为唯一标识生成器的优缺点：
+
+Pros:
+
+- Generating UUID is simple. No coordination between servers is needed so there will not be any synchronization issues.
+- The system is easy to scale because each web server is responsible for generating IDs they consume. ID generator can
+  easily scale with web servers.
+
+Cons:
+
+- IDs are 128 bits long, but our requirement is 64 bits. 09c93e62-50b4-468d-bf8a- c07e1040bfb2 是32个十六进制数字 32*4
+- IDs do not go up with time. 不随着时间递增
+- IDs could be non-numeric. 有非数字，六十进制表示法。
+
+#### Ticket Server
+
+The idea is to use a centralized auto_increment feature in a single database server (Ticket Server).
+
+##### Ticket server 优缺点：
+
+Pros:
+
+- Numeric IDs.
+- It is easy to implement, and it works for small to medium-scale applications.
+
+Cons:
+
+- Single point of failure 单点故障. Single ticket server means if the ticket server goes down, all systems that depend
+  on it will face issues. To avoid a single point of failure, we can set up multiple ticket servers.
+  However, this will introduce new challenges such as data synchronization. 需要专门一个生成 ID 的服务器，增加系统复杂度
+
+#### Twitter snowflake approach
+
+分而治之 Divide and conquer
+
+| 1bit     | 41bits                                       | 5bits         | 5bits      | 12bits                                                                               |
+|----------|----------------------------------------------|---------------|------------|--------------------------------------------------------------------------------------|
+| 0        | timestamp                                    | datacenter ID | machine ID | sequence number                                                                      |
+| reserved | Milliseconds since the epoch or custom epoch | 32 个          | 32 个       | the sequence number is incremented by 1. The number is reset to 0 every millisecond. |
+
+```python
+>> > time.time()
+1716538915.8404758
+# timestamp 是 17 位 字符串
+# 实际环境中：在ASCII码编码方案中，一个英文字符占用一个字节，一个汉字字符占用两个字节的空间；
+# 在Unicode编码方案中，一个英文字符或一个汉字字符都占用两个字节的空间；
+# 在UTF-8编码方案中，一个英文字符占用一个字节，一个汉字字符占用三个字节的空间
+```
+
+Twitter snowflake default epoch 起始时间点 1288834974657, equivalent to Nov 04, 2010, 01:42:54 UTC.
+
+### Step 3 - Design deep dive
+
+#### timestamp
+
+2 ^ 41 - 1 = 2199023255551 13位字符串 最小单位是毫秒。 41 位标识的数值
+
+2199023255551/1000/60/60/24/365 = 69 年
+
+我们可以设置今天为时间戳的起点，69年后再次更换时间戳起点。
+having a custom epoch time close to today’s date delays the overflow time. After 69 years, we will need a new epoch time
+or adopt other techniques to migrate IDs.
+
+#### sequence number
+
+2 ^ 12 = 4096 combinations. This field is 0 unless more than one ID is generated in
+a millisecond on the same server. In theory, a machine can support a maximum of 4096 new IDs per millisecond.
+
+### Step 4 wrap up
+
+- Clock synchronization. In our design, we assume ID generation servers have the same clock. This assumption might not
+  be true when a server is running on multiple cores. The same challenge exists in multi-machine scenarios. Solutions to
+  clock synchronization are out of the scope of this book; however, it is important to understand the problem exists.
+  Network Time Protocol is the most popular solution to this problem.
+- Section length tuning. For example, fewer sequence numbers but more timestamp bits are effective for low concurrency
+  and long- term applications.
+- High availability. Since an ID generator is a mission-critical system, it must be highly available.
+
+#### Detail of NTP
+
+Process:
+
+- Initial Request: Your device (client) sends a time request message to an NTP server (usually a Stratum 2 or 3
+  server on the internet).
+- Timestamps:
+	- The request message includes a timestamp (T1) of when the request was sent from the client.
+	- The server timestamps the message when it receives it (T2).
+	- The server then sends a response message back to the client.
+	- The response message includes a timestamp (T3) of when the response was sent by the server.
+	- The server also includes a timestamp (T4) of the server's current time when it processed the request.
+- Round-Trip Time Calculation: The client calculates the round-trip time (RTT) for the message exchange:
+  RTT = (T4 - T1) - (T3 - T2).
+- Clock Skew Estimation: The client estimates the clock skew (difference in clock rates) between itself and the
+  server by averaging the difference between T4 - T1 and T3 - T2.
+- Time Correction: The client adjusts its own clock by half of the estimated round-trip time plus the clock skew
+  estimation. This approach helps compensate for network delays and clock drift.
+
+NTP 只能同步不同服务器之间的时间，不能保证对方的时间就是对的。
 
 ## References
 
