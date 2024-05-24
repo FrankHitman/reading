@@ -809,6 +809,9 @@ SSTable contains the key. Bloom filter is commonly used to solve this problem.
 
 redis 4 中引入了 布隆过滤器，用于判断某个 key 是否存在。当布隆过滤器说某个值存在时，这个值可能不存在；当它说不存在时，那就肯定不存在。
 
+bloomfilter 把某个值的存在与否映射到一个二进制的列表中，有一点像 100 瓶药水，用 7 只小白鼠验证哪一瓶药水有毒。
+参考 [bloom_filter.py](bloom_filter.py)
+
 ### summary
 ![](summary-key-value-store.jpg)
 
