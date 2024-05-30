@@ -1156,6 +1156,304 @@ The mappings are:
 
 ## Chapter 9: Design a web crawler 爬虫
 
+A web crawler is known as a robot or spider. It is widely used by search engines to discover new or updated content on
+the web. Content can be a web page, an image, a video, a PDF file, etc.
+
+use case:
+
+- Search engine indexing. Googlebot
+- Web archiving.
+	- US Library of Congress
+	- EU web archive
+- Web mining. 数据挖掘。 top financial firms use crawlers to download shareholder meetings and annual reports to learn
+  key company initiatives.
+- Web monitoring. monitor copyright 版权 and trademark 商标 infringements 违反 over the Internet
+
+### Step 1 - Understand the problem and establish design scope
+
+1. Given a set of URLs, download all the web pages addressed by the URLs. 给定一组 URL，下载页面内容
+2. Extract URLs from these web pages. 从给定的 URL 网页中提取新的 URL
+3. Add new URLs to the list of URLs to be downloaded. Repeat these 3 steps.
+
+```
+Candidate: What is the main purpose of the crawler? Is it used for search engine indexing, data mining, or something else? 
+Interviewer: Search engine indexing. 目的
+Candidate: How many web pages does the web crawler collect per month?
+Interviewer: 1 billion pages. 一个月10亿页 1,000,000,000/M  385 pages/s
+Candidate: What content types are included? HTML only or other content types such as PDFs and images as well?
+Interviewer: HTML only. 页面内容
+Candidate: Shall we consider newly added or edited web pages? 
+Interviewer: Yes, we should consider the newly added or edited web pages. 追踪页面更新内容
+Candidate: Do we need to store HTML pages crawled from the web?
+Interviewer: Yes, up to 5 years 存储 5 年， 1页 100KB， 5*24*1000000000*100/1000m/1000g/1000t/1000p  = 12PB 存储空间
+Candidate: How do we handle web pages with duplicate content? 
+Interviewer: Pages with duplicate content should be ignored. 去重
+```
+
+- Scalability. using parallelization 并行
+- Robustness: The web is full of traps. Bad HTML, unresponsive servers, crashes, malicious links, etc. are all common.
+  服务器不响应，崩溃，恶意链接，验证码
+- Politeness: The crawler should not make too many requests to a website within a short time interval. 善意访问，避免被限流
+- Extensibility: The system is flexible so that minimal changes are needed to support new content types. 可扩展性
+
+#### Back of the envelope estimation
+
+- QPS: 385 pages/s
+- Peak QPS = 2 * QPS = 800
+- Assume the average web page size is 500k.
+- 1,000,000,000*500k/1000m/1000g/1000t 500TB/month
+- 500*12*5= 30PB
+
+### Step 2 - Propose high-level design and get buy-in
+
+![](crawler-architecture.jpg)
+
+- Step 1: Add seed URLs to the URL Frontier
+- Step 2: HTML Downloader fetches a list of URLs from URL Frontier.
+- Step 3: HTML Downloader gets IP addresses of URLs from DNS resolver and starts downloading.
+- Step 4: Content Parser parses HTML pages and checks if pages are malformed.
+- Step 5: After content is parsed and validated, it is passed to the “Content Seen?” component.
+- Step 6: “Content Seen” component checks if a HTML page is already in the storage.
+	- If it is in the storage, this means the same content in a different URL has already been processed. In this case,
+	  the HTML page is discarded.
+	- If it is not in the storage, the system has not processed the same content before. The content is passed to Link
+	  Extractor.
+- Step 7: Link extractor extracts links from HTML pages. Step 8: Extracted links are passed to the URL filter.
+- Step 9: After links are filtered, they are passed to the “URL Seen?” component.
+- Step 10: “URL Seen” component checks if a URL is already in the storage, if yes, it is processed before, and nothing
+  needs to be done.
+- Step 11: If a URL has not been processed before, it is added to the URL Frontier.
+
+#### seed URLs
+
+domain name
+
+The general strategy is to divide the entire URL space into smaller ones.
+
+- locality 不同国家
+- topics 不同主题，例如 购物，运动，健康
+
+#### URL frontier 边界 前沿
+
+Most modern web crawlers split the crawl state into two: to be downloaded and already downloaded.
+
+The component that stores URLs to be downloaded is called the URL Frontier.
+
+You can refer to this as a First-in-First-out (FIFO) queue.
+
+#### HTML Downloader
+
+HTML 页面下载器
+
+#### DNS Resolver DNS 解析器
+
+DNS -> IP
+
+#### Content Parser 内容分析器
+
+After a web page is downloaded, it must be parsed and validated
+because malformed web pages could provoke problems and waste storage space.
+Implementing a content parser in a crawl server will slow down the crawling process.
+Thus, the content parser is a separate component.
+
+#### Content Seen?
+
+Online research [6] reveals that 29% of the web pages are duplicated contents,
+which may cause the same content to be stored multiple times.
+
+- eliminate data redundancy
+- shorten processing time
+- detect new content previously stored in the system
+- compare the hash values of the two web pages instead of comparing character by character.
+
+#### Content Storage
+
+depends on factors such as data type, data size, access frequency, life span, etc. Both disk and memory are used.
+
+#### URL Extractor 新 URL 提取器
+
+Relative paths are converted to absolute URLs
+
+#### URL Filter 过滤器
+
+排除：
+
+- content types,
+- file extensions,
+- error links
+- URLs in “blacklisted” sites.
+
+#### URL Seen? 是否已经下载过，或者还在 frontier 列表中
+
+“URL Seen?” is a data structure that keeps track of URLs that are visited before or already in the Frontier.
+
+avoid adding the same URL multiple times as this can increase server load and cause potential infinite loops.
+
+Bloom filter and hash table are common techniques to implement the “URL Seen?” component.
+
+#### URL Storage
+
+URL Storage stores already visited URLs.
+
+### Step 3 - Design deep dive
+
+#### Depth-first search (DFS) vs Breadth-first search (BFS) 深度优先还是广度优先
+
+DFS is usually not a good choice because the depth of DFS can be very deep.
+
+BFS is commonly used by web crawlers and is implemented by a first-in-first-out (FIFO) queue.
+
+In a FIFO queue, URLs are dequeued in the order they are enqueued. However, this implementation has two problems:
+
+- Most links from the same web page are linked back to the same host. 多次访问同一个域名下的不同网页是不礼貌的，会被限流。
+- Standard BFS does not take the priority of a URL into consideration. 每个网页的重要性不一样，需要设置 URL 权重。指标有：
+	- page ranks, 页面排名
+	- web traffic, 网站流量
+	- update frequency 更新频率
+
+#### URL frontier
+
+##### Politeness.
+
+sending too many requests is considered as impolite or denial-of-service (DOS) attack
+
+- download one page at a time from the same host.
+- A delay can be added between two download tasks.
+
+![](crawler-url-politeness-architecture.jpg)
+
+- Queue router: It ensures that each queue (b1, b2, ... bn) only contains URLs from the same host.
+  队列路由器，保证一个队列里面塞入的是相同域名下的链接。
+- Mapping table: It maps each host to a queue. 队列路由器通过这个映射表来实现其功能。
+- FIFO queues b1, b2 to bn: Each queue contains URLs from the same host.
+- Queue selector: Each worker thread is mapped to a FIFO queue, and it only downloads URLs from that queue. The queue
+  selection logic is done by the Queue selector. 队列选择器，负责把队列与任务执行工人映射起来，一个队列的任务分给同一个工人。
+- Worker thread 1 to N. A worker thread downloads web pages one by one from the same host. A delay can be added between
+  two download tasks. 工人下载网页内容，为了文明下载，需要给任务之间添加延时。
+
+##### Priority 优先级
+
+base on:
+
+- usefulness, which can be measured by PageRank
+- website traffic,
+- update frequency,
+
+![](crawler-url-priority-politeness-architecture.jpg)
+
+- Prioritizer: It takes URLs as input and computes the priorities.
+- Queue f1 to fn: Each queue has an assigned priority. Queues with high priority are selected with higher probability.
+- Queue selector: Randomly choose a queue with a bias towards queues with higher priority.
+
+先排优先级，队列选择器优先选择高权重的队列里面的URL，并传给URL域名路由器，再排域名归属。
+
+##### Freshness 刷新
+
+Recrawl all the URLs is time-consuming 耗时 and resource intensive 资源密集型的. Few strategies to optimize freshness
+are listed as follows:
+
+- Recrawl based on web pages’ update history. 基于历史更新数据去确定重新爬取数据的周期。
+- Prioritize URLs and recrawl important pages first and more frequently. 高权重的URLs 需要高频率的重新爬取。
+
+##### Storage for URL Frontier
+
+几千万条 URL，存内存里面不现实，一是断电可能丢，二是不好规模扩展。全部存磁盘又回很慢。
+两者结合获取各取所长，各避所短。
+
+- The majority of URLs are stored on disk
+- we maintain buffers in memory for enqueue/dequeue operations. Data in the buffer is periodically written to the disk.
+
+#### HTML Downloader
+
+##### Robots.txt
+
+called Robots Exclusion Protocol, is a standard used by websites to communicate with crawlers. It specifies what pages
+crawlers are allowed to download.
+
+To avoid repeat downloads of robots.txt file, we cache the results of the file. 存储网页的hash值，避免逐个字节比对。
+
+##### Performance optimization
+
+###### 1. Distributed crawl
+
+To achieve high performance, crawl jobs are distributed into multiple servers, and each server runs multiple threads.
+The URL space is partitioned into smaller pieces; so, each downloader is responsible for a subset of the URLs
+URLs 也要分区，多个服务器上的爬虫负责抓取各自的分区的 URLs。避免重复。
+
+###### 2. Cache DNS Resolver
+
+缓存DNS解析的结果，减少网络请求耗时。但是有些域名会更新IP地址，所以需要权衡缓存的过期时间，或者定期更新。
+
+DNS requests might take time due to the synchronous nature of many DNS interfaces.
+DNS解析是同步顺序进行的，不可以并发。多个线程同时请求，后面的线程需要等待前一个线程取到DNS结果之后才可以。
+
+###### 3. Locality
+
+爬虫所在服务器需要在地理上靠近被爬的网站服务器所在的位置。降低网络耗时。
+
+###### 4. Short timeout
+
+有些网站响应很慢，或者没有响应。需要设置等待的过期时间。
+
+##### Robustness 健壮性
+
+- Consistent hashing: This helps to distribute loads among downloaders. A new downloader server can be added or removed
+  using consistent hashing. Refer to Chapter 5: Design consistent hashing for more details.
+  给下载器群组设置一致性hash的架构，方便扩容和缩容服务器集群。
+- Save crawl states and data: To guard against failures, crawl states and data are written to a storage system. A
+  disrupted crawl can be restarted easily by loading saved states and data. 保存断点状态和数据，不至于重起程序时候从头再来。
+- Exception handling: Errors are inevitable and common in a large-scale system. The crawler must handle exceptions
+  gracefully without crashing the system. 错误处理，避免使整个系统崩溃。
+- Data validation: This is an important measure to prevent system errors. 数据验证，例如URL合法性验证，下载网页内容验证。
+
+##### Extensibility 可扩展性
+
+在架构的 "content seen？" 后面可以添加以下两个模块：
+
+- PNG Downloader module is plugged-in to download PNG files. 图片下载器
+- Web Monitor module is added to monitor the web and prevent copyright 版权 and trademark 商标 infringements 侵犯.
+
+##### Detect and avoid problematic content
+
+This section discusses the detection and prevention of redundant 冗余的, meaningless 无意义的, or harmful 有害的
+content.
+
+1. Redundant content
+   As discussed previously, nearly 30% of the web pages are duplicates. Hashes or checksums help to detect duplication
+
+2. Spider traps
+   A spider trap is a web page that causes a crawler in an infinite loop.
+   www.spidertrapexample.com/foo/bar/foo/bar/foo/bar/...
+   Such spider traps can be avoided by setting a maximal length for URLs. 限定URL长度
+   However, no one-size-fits-all solution exists to detect spider traps.
+   Websites containing spider traps are easy to identify due to an unusually large number of web pages
+   discovered on such websites. It is hard to develop automatic algorithms to avoid spider traps;
+   however, a user can manually verify and identify a spider trap, and either exclude those websites
+   from the crawler or apply some customized URL filters. 或许可以让 AI 来进行特征学习，以此来减少人工干预。
+3. Data noise
+   Some of the contents have little or no value, such as advertisements 广告, code snippets 代码片段, spam URLs 钓鱼链接.
+   Those contents are not useful for crawlers and should be excluded if possible.
+   谷歌广告，百度广告链接，代码片段或许有特征，钓鱼链接该怎么识别？
+
+### Step 4 - Wrap up
+
+- Server-side rendering: Numerous websites use scripts like JavaScript, AJAX, etc to generate links on the fly. If we
+  download and parse web pages directly, we will not be able to retrieve dynamically generated links. To solve this
+  problem, we perform server-side rendering 服务端渲染 (also called dynamic rendering 动态渲染) first before parsing a page. 
+  动态能容的获取，纯 HTML 页面的内容很少，数据还需要通过 JS 异步请求获取。
+  ![](dynamic-rendering.jpg)
+  refer to [dynamic-rendering](https://developers.google.com/search/docs/crawling-indexing/javascript/dynamic-rendering)
+- Filter out unwanted pages: With finite storage capacity and crawl resources, an anti-spam component is beneficial in
+  filtering out low quality and spam pages. 过滤低质量和钓鱼页面
+- Database replication and sharding: Techniques like replication and sharding are used to improve the data layer
+  availability, scalability, and reliability. 数据库备份和分区
+- Horizontal scaling: For large scale crawl, hundreds or even thousands of servers are needed to perform download tasks.
+  The key is to keep servers stateless. 保持服务器无状态才可以横向扩展。前面又要求保存任务状态，便于重起之后从断点继续。
+- Availability, consistency, and reliability: These concepts are at the core of any large system’s success. We discussed
+  these concepts in detail in Chapter 1. Refresh your memory on these topics.
+- Analytics: Collecting and analyzing data are important parts of any system because data is key ingredient for
+  fine-tuning.
+
 ## References
 
 - "System Design Interview An Insider's Guide" by Alex Xu
