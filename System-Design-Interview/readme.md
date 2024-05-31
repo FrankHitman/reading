@@ -1439,7 +1439,8 @@ content.
 
 - Server-side rendering: Numerous websites use scripts like JavaScript, AJAX, etc to generate links on the fly. If we
   download and parse web pages directly, we will not be able to retrieve dynamically generated links. To solve this
-  problem, we perform server-side rendering 服务端渲染 (also called dynamic rendering 动态渲染) first before parsing a page. 
+  problem, we perform server-side rendering 服务端渲染 (also called dynamic rendering 动态渲染) first before parsing a
+  page.
   动态能容的获取，纯 HTML 页面的内容很少，数据还需要通过 JS 异步请求获取。
   ![](dynamic-rendering.jpg)
   refer to [dynamic-rendering](https://developers.google.com/search/docs/crawling-indexing/javascript/dynamic-rendering)
@@ -1453,6 +1454,223 @@ content.
   these concepts in detail in Chapter 1. Refresh your memory on these topics.
 - Analytics: Collecting and analyzing data are important parts of any system because data is key ingredient for
   fine-tuning.
+
+## Chapter 10: Design a notification system
+
+- breaking news
+- product updates
+- events
+- offering
+
+include:
+
+- mobile push notification
+- sms message
+- email
+
+### Step 1 - Understand the problem and establish design scope
+
+```
+Candidate: What types of notifications does the system support? 
+Interviewer: Push notification, SMS message, and email. 手机通知，短信，邮件
+Candidate: Is it a real-time system?
+Interviewer: Let us say it is a soft real-time system. We want a user to receive notifications as soon as possible. 
+However, if the system is under a high workload, a slight delay is acceptable. 尽可能实时推送
+Candidate: What are the supported devices?
+Interviewer: iOS devices, android devices, and laptop/desktop. 支持的设备包括移动端和PC端
+Candidate: What triggers notifications?
+Interviewer: Notifications can be triggered by client applications. They can also be scheduled on the server-side. 
+客户端触发，或者服务端定时推送。
+Candidate: Will users be able to opt-out?
+Interviewer: Yes, users who choose to opt-out will no longer receive notifications. 用户可以取消接收推送
+Candidate: How many notifications are sent out each day? 
+Interviewer: 10 million mobile push notifications, 1 million SMS messages, and 5 million emails. 
+一天 1千万条手机推送，1百万条短信推送，5百万条邮件推送。 16000000/24/60/60 = 185 QPS
+是否需要存储消息？存储几天？ 
+```
+
+### Step 2 - Propose high-level design and get buy-in
+
+- Different types of notifications
+- Contact info gathering flow
+- Notification sending/receiving flow
+
+#### Different types of notifications
+
+##### iOS push notification
+
+Provider -> APNs -> iOS
+
+- Provider. A provider builds and sends notification requests to Apple Push Notification Service (APNS). To construct a
+  push notification, the provider provides the following data:
+	- Device token: This is a unique identifier used for sending push notifications. 设备token，设备的ID
+	- Payload: This is a JSON dictionary that contains a notification’s payload. 消息内容
+- APNS: This is a remote service provided by Apple to propagate push notifications to iOS devices. 苹果提供服务
+- iOS Device: It is the end client, which receives push notifications.
+
+##### Android push notification
+
+Provider -> FCM -> Android
+
+##### SMS message
+
+Provider -> SMS service -> SMS
+
+- Twilio,
+- Nexmo
+
+##### Email
+
+Provider -> Email service -> Email
+
+- Sendgrid,
+- Mailchimp
+
+#### Contact info gathering flow
+
+- mobile device tokens
+- phone numbers
+- email address
+
+- user 表
+- device 表 用户1对多device
+
+#### Notification sending/receiving flow
+
+![](notification-architecture-draft.jpg)
+
+- Service 1 to N: A service can be a micro-service, a cron job, or a distributed system that triggers notification
+  sending events. For example, a billing service sends emails to remind customers of their due payment or a shopping
+  website tells customers that their packages will be delivered tomorrow via SMS messages. 产生推送消息的上游，各种微服务。
+- Notification system: The notification system is the centerpiece of sending/receiving notifications. Starting with
+  something simple, only one notification server is used. It provides APIs for services 1 to N, and builds notification
+  payloads for third party services. 消息整合中心，收集与分发消息。多service对一center，一center对多第三方。
+- Third-party services: Third party services are responsible for delivering notifications to users. While integrating
+  with third-party services, we need to pay extra attention to extensibility. Good extensibility means a flexible system
+  that can easily plugging or unplugging of a third-party service. Another important consideration is that a third-party
+  service might be unavailable in new markets or in the future. For instance, FCM is unavailable in China.
+  Thus, alternative third-party services such as Jpush, PushY, etc are used there.
+
+##### challenges
+
+- Single point of failure (SPOF): A single notification server means SPOF. Notification system 单点故障
+- Hard to scale: The notification system handles everything related to push notifications in one server. It is
+  challenging to scale databases, caches, and different notification processing components independently.
+  不易于扩展规模，
+- Performance bottleneck: Processing and sending notifications can be resource intensive. For example, constructing HTML
+  pages and waiting for responses from third party services could take time. Handling everything in one system can
+  result in the system overload, especially during peak hours. 性能瓶颈，耗资源的任务：构建邮件HTML内容，等待第三方返回。
+
+##### High-level design (improved)
+
+- Move the database and cache out of the notification server.
+- Add more notification servers and set up automatic horizontal scaling.
+- Introduce message queues to decouple the system components.
+
+![](notification-architecture-optimized.jpg)
+
+Notification servers: They provide the following functionalities:
+
+- Provide APIs for services to send notifications. Those APIs are only accessible internally or by verified clients to
+  prevent spams. 提供仅供内部调用的API，用于收集各个微服务的消息需求。
+- Carry out basic validations to verify emails, phone numbers, etc. 验证信息的有效性，例如邮箱格式，电话号码。
+- Query the database or cache to fetch data needed to render a notification. 查询数据库获取需要的信息，用于生成推送内容。
+- Put notification data to message queues for parallel processing. 把推送内容放到消息队列里面，便于多个worker同步推送。
+
+Cache: User info, device info, notification templates are cached. 缓存用户信息，设备信息，推送消息模版
+
+DB: It stores data about user, notification, settings, etc.
+
+Message queues: They remove dependencies between components. Message queues serve as buffers when high volumes of
+notifications are to be sent out. Each notification type is assigned with a distinct message queue so an outage in one
+third-party service will not affect other notification types. 消息的缓冲区，一种第三方服务挂掉，不影响其他类型的推送。
+
+Workers: Workers are a list of servers that pull notification events from message queues and send them to the
+corresponding third-party services.
+
+### Step 3 - Design deep dive
+
+- Reliability.
+- Additional component and considerations:
+	- notification template,
+	- notification settings,
+	- rate limiting,
+	- retry mechanism,
+	- security in push notifications,
+	- monitor queued notifications
+	- event tracking.
+- Updated design.
+
+#### Reliability 可靠性
+
+##### How to prevent data loss?
+
+Notifications can usually be delayed or re-ordered, but never lost. 可以重新排序，延迟发送，但是不能丢，保证最终送达。
+
+To satisfy this requirement, the notification system persists notification data in a database and implements a retry
+mechanism. 把消息存储在磁盘上，避免在内存中丢失，或者第三方服务挂掉重启之后的重试发送。
+
+--> notification log. workers 在发送时候同步存储消息内容到 notification log 里面
+
+##### Will recipients receive a notification exactly once?
+
+事实上需要去重复。
+
+dedupe logic:
+
+When a notification event first arrives, we check if it is seen before by checking the event ID. If it is seen before,
+it is discarded. Otherwise, we will send out the notification.
+
+#### Additional components and considerations
+
+template reusing, notification settings, event tracking, system monitoring, rate limiting,
+
+##### Notification template
+
+##### Notification setting
+
+give users fine-grained control over notification settings. 容许用户取消订阅消息。
+
+- user_id
+- channel # email/SMS/app notification
+- opt_in # on/off
+
+##### Rate limiting 限速
+
+给每个用户设定推送消息的最多条数。
+
+This is important because receivers could turn off notifications completely if we send too often.
+
+##### Retry mechanism
+
+When a third-party service fails to send a notification, the notification will be added to the message queue for
+retrying. If the problem persists, an alert will be sent out to developers.
+错误重试，尤其是第三方服务不可靠时候。
+
+##### Monitor queued notifications
+
+A key metric to monitor is the total number of queued notifications. If the number is large, the notification events are
+not processed fast enough by workers. To avoid delay in the notification delivery, more workers are needed.
+监控消息队列里面的消息的条数，如果太多会导致延迟，那就考虑多加几个workers
+
+##### Events tracking
+
+Notification metrics, such as open rate, click rate, and engagement are important in understanding customer behaviors.
+用于分析用户行为的数据，点击率，打开率，活动参与率。
+
+为 Analytics service 分析服务收集数据。
+
+#### updated design
+
+![](notification-architecture-deep-design.jpg)
+
+- The notification servers are equipped with two more critical features: authentication and rate-limiting. 
+  认证避免API被外部调用，限速避免频繁推送。
+- We also add a retry mechanism to handle notification failures. If the system fails to send notifications, they are put
+  back in the messaging queue and the workers will retry for a predefined number of times. 
+  放回原来的队列和之前讲的存储到磁盘上面的设计不一样。预设重试次数。
+- Furthermore, notification templates provide a consistent and efficient notification creation process.
+- Finally, monitoring and tracking systems are added for system health checks and future improvements.
 
 ## References
 
