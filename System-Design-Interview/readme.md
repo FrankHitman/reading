@@ -1664,13 +1664,225 @@ Notification metrics, such as open rate, click rate, and engagement are importan
 
 ![](notification-architecture-deep-design.jpg)
 
-- The notification servers are equipped with two more critical features: authentication and rate-limiting. 
+- The notification servers are equipped with two more critical features: authentication and rate-limiting.
   认证避免API被外部调用，限速避免频繁推送。
 - We also add a retry mechanism to handle notification failures. If the system fails to send notifications, they are put
-  back in the messaging queue and the workers will retry for a predefined number of times. 
+  back in the messaging queue and the workers will retry for a predefined number of times.
   放回原来的队列和之前讲的存储到磁盘上面的设计不一样。预设重试次数。
 - Furthermore, notification templates provide a consistent and efficient notification creation process.
 - Finally, monitoring and tracking systems are added for system health checks and future improvements.
+
+## Chapter 11: Design a news feed system 新鲜事订阅系统
+
+According to the Facebook help page, “News feed is the constantly updating list of stories in the middle of your home
+page. News Feed includes status updates, photos, videos, links, app activity, and likes from people, pages, and groups
+that you follow on Facebook” 主页不断地更新的新鲜事
+
+### Step 1 - Understand the problem and establish design scope
+
+```
+Candidate: Is this a mobile app? Or a web app? Or both? 
+Interviewer: Both 即是手机应用又是web应用
+Candidate: What are the important features?
+Interview: A user can publish a post and see her friends’ posts on the news feed page. 发布帖子，订阅帖子
+Candidate: Is the news feed sorted by reverse chronological order or any particular order such as topic scores? 
+For instance, posts from your close friends have higher scores.
+Interviewer: To keep things simple, let us assume the feed is sorted by reverse chronological order. 时间倒序排列
+Candidate: How many friends can a user have? 
+Interviewer: 5000 一个人可以订阅5000个人的状态更新
+Candidate: What is the traffic volume? 
+Interviewer: 10 million DAU daily active user 日活 1千万用户 10,000,000/24/60/60 = 115 QPS
+Candidate: Can feed contain images, videos, or just text? 
+Interviewer: It can contain media files, including both images and videos. 
+假如平均每个用户产生文字视频和图片总和大小为10M，每天产生 10,000,000 * 10MB = 10TB 每天。 5年就是 5*365*10 = 18PB
+```
+
+### Step 2 - Propose high-level design and get buy-in
+
+two flows:
+
+- Feed publishing: when a user publishes a post, corresponding data is written into cache and database. A post is
+  populated to her friends’ news feed. 新闻发布
+- Newsfeed building: for simplicity, let us assume the news feed is built by aggregating friends’ posts in reverse
+  chronological order. 新闻馈送
+
+#### Newsfeed APIs
+
+posting a status, retrieving news feed, adding friends, 添加好友
+
+- Feed publishing API
+
+```
+POST /v1/me/feed
+Params:
+- content: content is the text of the post.
+- auth_token: it is used to authenticate API requests.
+
+```
+
+- Newsfeed retrieval API
+
+```
+GET /v1/me/feed
+Params:
+- auth_token: it is used to authenticate API requests.
+```
+
+#### Feed publishing
+
+![](feed-publish-architecture.jpg)
+
+- Web servers: web servers redirect traffic to different internal services. 重定向流量到不同的内部微服务
+- Post service: persist post in the database and cache. 存储帖子到数据库和缓存中（内存中，redis）
+- Fanout service: push new content to friends’ news feed. Newsfeed data is stored in the cache for fast retrieval.
+  推送新内容到朋友的订阅中，存储在缓存中（内存中）。
+- Notification service: inform friends that new content is available and send out push notifications. 上一章的消息推送系统。
+
+#### Newsfeed building
+
+![](newsfeed-build-architecture.jpg)
+
+- Web servers: web servers route requests to newsfeed service.
+- Newsfeed service: news feed service fetches news feed from the cache.
+- Newsfeed cache: store news feed IDs needed to render the news feed.
+
+### Step 3 - Design deep dive
+
+#### Feed publishing deep dive
+
+![](feed-publish-architecture-deep-design.jpg)
+
+##### Web servers
+
+Besides communicating with clients, web servers enforce authentication and rate-limiting. Only users signed in with
+valid auth_token are allowed to make posts. The system limits the number of posts a user can make within a certain
+period, vital to prevent spam and abusive content.
+添加认证和限速功能。阻止垃圾和滥用内容。
+
+##### Fanout service
+
+Fanout is the process of delivering a post to all friends.
+Two types of fanout models are:
+
+- fanout on write (also called push model)
+- and fanout on read (also called pull model).
+
+###### Fanout on write.
+
+With this approach, news feed is pre-computed during write time. A new post is delivered to friends’ cache immediately
+after it is published.
+
+Pros:
+
+- The news feed is generated in real-time and can be pushed to friends immediately. 实时生成推送内容，可以实时推送消息
+- Fetching news feed is fast because the news feed is pre-computed during write time. 订阅方登录之后可以很快速的获取内容更新
+
+Cons:
+
+- If a user has many friends, fetching the friend list and generating news feeds for all of them are slow and
+  time-consuming. It is called hotkey problem. 如果用户发布者有许多订阅者，实时生成推送内容会慢，并且耗费资源。热键问题。
+- For inactive users or those rarely log in, pre-computing news feeds waste computing resources.
+  对于那些不活跃用户，预生成推送内容是对计算资源的浪费。
+
+###### Fanout on read.
+
+The news feed is generated during read time. This is an on-demand model. Recent posts are pulled when a user loads her
+home page.
+
+Pros:
+
+- For inactive users or those who rarely log in, fanout on read works better because it will not waste computing
+  resources on them. 对于不活跃用户场景，读取时候生成更新内容可以节省计算资源。
+- Data is not pushed to friends so there is no hotkey problem. 用户没登录，不会有推送内容，即使发布者有很多订阅者，只要订阅者不上线就不会产生热键问题。
+
+Cons:
+
+- Fetching the news feed is slow as the news feed is not pre-computed. 由于不是预生成推送消息，生成消息比较慢
+
+###### choice
+
+We adopt a hybrid approach to get benefits of both approaches and avoid pitfalls in them.
+
+- Since fetching the news feed fast is crucial, we use a push model for the majority of users. 对于大多数普通用户使用主动推送模型。
+- For celebrities or users who have many friends/followers, we let followers pull news content on-demand to avoid
+  system overload. 对于名人使用被动拉取模型。
+- Consistent hashing is a useful technique to mitigate the hotkey problem as it helps to distribute requests/data more
+  evenly. 一致性哈希可以用于分发热点请求到不同服务器上。
+
+###### The fanout service works as follows:
+
+1. Fetch friend IDs from the graph database. Graph databases are suited for managing friend relationship and friend
+   recommendations. Interested readers wishing to learn more about this concept should refer to the reference material
+   图数据库（Graph Database）是一种使用图结构进行语义查询的数据库。它使用节点（Node）、边（Edge）和属性（Property）来表示和存储数据。
+   图数据库的关键概念是图，它能够高效地表示和查询实体及其之间的关系。
+
+2. Get friends info from the user cache. The system then filters out friends based on user settings. 获取可以推送的朋友列表。
+	- For example, if you mute someone, her posts will not show up on your news feed even though you are still
+	  friends. 被订阅者屏蔽的用户发布的内容。
+	- Another reason why posts may not show is that a user could selectively share information with specific friends or
+	  hide it from other people. 发布者屏蔽的订阅者
+3. Send friends list and new post ID to the message queue.
+4. Fanout workers fetch data from the message queue and store news feed data in the news feed cache.
+   获取ID和消息数据，生成推送消息内容，并且存储到缓存中。
+	- You can think of the news feed cache as a <post_id, user_id> mapping table. Whenever a new post is made, it will
+	  be appended to the news feed table
+	- The memory consumption can become very large if we store the entire user and post objects in the cache. Thus, only
+	  IDs are stored. 节省内存消耗，存储消息ID即可
+	- The chance of a user scrolling through thousands of posts in news feed is slim. Most users are only interested in
+	  the latest content 用户查看所有消息的概率低，只对最新的推送感兴趣，有必要设置过期时间，对过时的并且未被用户查看的内容进行清理。
+5. Store <post_id, user_id > in news feed cache.
+
+#### Newsfeed retrieval deep dive
+
+![](newsfeed-retrieval-architecture-deep-design.jpg)
+
+media content (images, videos, etc.) are stored in CDN for fast retrieval.
+
+4. News feed service gets a list post IDs from the news feed cache. 从订阅系统缓存中获取帖子ID
+
+5. A user’s news feed is more than just a list of feed IDs. It contains username, profile picture, post content, post
+   image, etc. Thus, the news feed service fetches the complete user and post objects from caches (user cache and post
+   cache) to construct the fully hydrated news feed. 除了帖子ID，还要获取用户名，图片，内容。
+
+6. The fully hydrated news feed is returned in JSON format back to the client for rendering.
+
+#### Cache architecture
+
+|                  |              |               |                |
+|------------------|--------------|---------------|----------------|
+| Nees Feed        | news feed    |               |                |
+| Content          | hot cache    | normal        |                |
+| Social Graph 关系图 | follower     | following     |                |
+| Action           | liked        | replied       | others         |
+| Counters         | like counter | reply counter | other counters |
+
+- News Feed: It stores IDs of news feeds.
+- Content: It stores every post data. Popular content is stored in hot cache.
+- Social Graph: It stores user relationship data.
+- Action: It stores info about whether a user liked a post, replied a post, or took other actions on a post.
+- Counters: It stores counters for like, reply, follower, following, etc.
+
+### Step 4 - Wrap up
+
+其他高视角可以讨论的内容：
+
+Scaling the database:
+
+- Vertical scaling vs Horizontal scaling 横向与纵向扩展规模
+- SQL vs NoSQL
+- Master-slave replication
+- Read replicas 读复制
+- Consistency models
+- Database sharding 数据库分片
+
+Other talking points:
+
+- Keep web tier stateless 无状态服务，便于扩展
+- Cache data as much as you can
+- Support multiple data centers
+- Lose couple components with message queues 通过消息队列解组件之间的耦合
+- Monitor key metrics. For instance, QPS during peak hours and latency while users refreshing their news feed are
+  interesting to monitor.
 
 ## References
 
