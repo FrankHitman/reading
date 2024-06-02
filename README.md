@@ -8,4 +8,5 @@ Some insights and notes from reading books
 - [2022年4月14日夜記](2022年4月14日夜記/readme.md)
 - [读软件设计的哲学](A-Philosophy-of-Software-Design/readme.md)
 - [读 Bash脚本教程](bash/readme.md)
+- [读系统设计面试](System-Design-Interview/readme.md)
 
