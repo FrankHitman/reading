@@ -1884,6 +1884,361 @@ Other talking points:
 - Monitor key metrics. For instance, QPS during peak hours and latency while users refreshing their news feed are
   interesting to monitor.
 
+## Chapter 12: Design a chat system
+
+### Step 1 - Understand the problem and establish design scope
+
+- one-on-on chat
+	- facebook messenger
+	- wechat
+	- whatsapp
+
+- group chat
+	- office chat
+		- slack
+	- game chat
+		- discord
+
+```
+Candidate: What kind of chat app shall we design? 1 on 1 or group based?
+Interviewer: It should support both 1 on 1 and group chat. 两种都要支持，多客户端支持。
+Candidate: Is this a mobile app? Or a web app? Or both? 
+Interviewer: Both. app与网页版都要
+Candidate: What is the scale of this app? A startup app or massive scale?
+Interviewer: It should support 50 million daily active users (DAU). 50,000,000 日活用户，50000000/24/60/60=578 QPS
+Candidate: For group chat, what is the group member limit? 
+Interviewer: A maximum of 100 people 群聊最大规模100人
+Candidate: What features are important for the chat app? Can it support attachment?
+Interviewer: 1 on 1 chat, group chat, online indicator. The system only supports text messages. 在线指示，只支持文字消息。
+Candidate: Is there a message size limit?
+Interviewer: Yes, text length should be less than 100,000 characters long. 一个字符1Byte 100KB
+Candidate: Is end-to-end encryption required?
+Interviewer: Not required for now but we will discuss that if time allows. 端到端加密
+Candidate: How long shall we store the chat history? 
+Interviewer: Forever. 算一下50年多少存储空间， 一个用户一天发10条消息，1MB*50,000,000*365*50 = 18.25 PB*50 = 912 PB
+```
+
+- A one-on-one chat with low delivery latency
+- Small group chat (max of 100 people)
+- Online presence
+- Multiple device support. The same account can be logged in to multiple accounts at the same time.
+  客户端与服务端通信，服务端转发通信到其他客户端
+- Push notifications
+
+### Step 2 - Propose high-level design and get buy-in
+
+In a chat system, clients can be either mobile applications or web applications. Clients do not communicate directly
+with each other. Instead, each client connects to a chat service, which supports all the features mentioned above.
+
+functions:
+
+- Receive messages from other clients.
+- Find the right recipients for each message and relay the message to the recipients. 找到正确的接收者
+- If a recipient is not online, hold the messages for that recipient on the server until she is online. 离线消息
+
+implement:
+
+- the client opens a HTTP connection with the chat service and sends the message, informing the service to send the
+  message to the receiver. 客户端发起 HTTP 请求。
+- The keep-alive is efficient for this because the keep-alive header allows a client to maintain a persistent
+  connection with the chat service.It also reduces the number of TCP handshakes. HTTP 头参数 keep-alive
+- However, the receiver side is a bit more complicated. Since HTTP is client-initiated, it is not trivial to send
+  messages from the server. simulate a server-initiated connection:
+	- polling,
+	- long polling, and
+	- WebSocket.
+
+#### Polling 间歇性客户端请求拉取消息。
+
+polling is a technique that the client periodically asks the server if there are messages available.
+
+Depending on polling frequency, polling could be costly. It could consume precious server resources to answer a question
+that offers no as an answer most of the time. 比较耗费资源，因为一直问，而可能对方无答复。
+
+#### Long polling
+
+In long polling, a client holds the connection open until there are actually new messages available or a timeout
+threshold has been reached. 添加了等待，和等待超时。避免频繁发起HTTP请求，也会消耗HTTP连接资源。
+
+Once the client receives new messages, it immediately sends another request to the server, restarting the process. Long
+polling has a few drawbacks:
+
+- Sender and receiver may not connect to the same chat server. HTTP based servers are usually stateless. If you use
+  round robin for load balancing, the server that receives the message might not have a long-polling connection with the
+  client who receives the message.
+  在分布式系统中，发送和接收可能不是连接的同一个服务器。采用轮替的负载均衡策略会导致该回复消息的服务器获取不到那个客户端的长连接。也就是说这个方案扩展规模性scaling不好。
+- A server has no good way to tell if a client is disconnected. 服务端不知道客户端是否还在线。 status/online indicator.
+- It is inefficient. If a user does not chat much, long polling still makes periodic connections after timeouts.
+
+#### WebSocket
+
+WebSocket connection is initiated by the client. It is bi-directional and persistent. 双向的，持久的。
+
+It starts its life as a HTTP connection and could be “upgraded” via some well-defined handshake to a WebSocket
+connection.
+
+Through this persistent connection, a server could send updates to a client.
+
+WebSocket connections generally work even if a firewall is in place. This is because they use port 80 or 443 which are
+also used by HTTP/HTTPS connections.
+
+#### High-level design
+
+- stateless services,
+- stateful services, and
+- third- party integration.
+
+![](chat-high-level-architecture.jpg)
+
+##### Stateless Services
+
+- login, signup, user profile 普通的操作用HTTP协议即可
+- service discovery. Its primary job is to give the client a list of DNS host names of chat servers that the client
+  could connect to. 服务发现
+
+##### Stateful Service
+
+In this service, a client normally does not switch to another chat server as long as the server is still available.
+因为是长连接，连接断掉之前，客户端不切换服务器。
+
+The service discovery coordinates closely with the chat service to avoid server overloading.
+
+##### Third-party integration
+
+push notification, It is a way to inform users when new messages have arrived, even when the app is not running.
+
+##### Scalability
+
+In our scenario, at 1M concurrent users, assuming each user connection needs 10K of memory on the server (this is a very
+rough figure and very dependent on the language choice), it only needs about 10GB of memory to hold all the connections
+on one box.
+
+从单台服务器扩大规模到多台服务器。
+
+![](chat-scalability-architecture.jpg)
+
+- Chat servers facilitate message sending/receiving.
+- Presence servers manage online/offline status. 是否在线指示服务
+- API servers handle everything including user login, signup, change profile, etc. 普通登录，注册，个人信息等API
+- Notification servers send push notifications. 消息推送服务。
+- Finally, the key-value store is used to store chat history. When an offline user comes online, she will see all
+  her previous chat history. 键值对存储历史消息，离线消息
+
+##### Storage
+
+An important decision we must make is to decide on the right type of database to use: relational databases or NoSQL
+databases? 数据库类型的选择，关系型数据库还是非关系型数据库？
+
+The first is generic data, such as user profile, setting, user friends list. These data are stored in robust and
+reliable relational databases. Replication and sharding are common techniques to satisfy availability and scalability
+requirements. 普通用户数据使用关系型数据库，数据库备份，分片。
+
+The second is unique to chat systems: chat history data. It is important to understand the read/write pattern.
+聊天历史数据是海量的，需要单独考虑。
+
+- The amount of data is enormous for chat systems. A previous study reveals that Facebook messenger and Whatsapp process
+  60 billion messages a day. 一天600亿的消息。
+- Only recent chats are accessed frequently. Users do not usually look up for old chats. 最近消息访问频繁，太老的消息没必要存在缓存中。
+- Although very recent chat history is viewed in most cases, users might use features that require random access of
+  data, such as search, view your mentions, jump to specific messages, etc. These cases should be supported by the data
+  access layer. 随机快速访问历史消息数据，例如搜索，跳到指定消息。存储层需要支持快速访问的特性。
+- The read to write ratio is about 1:1 for 1 on 1 chat apps. 读写比是1比1，相对普通系统来说写比较频繁，要选择可以快速写的存储引擎。
+
+选择 key-value stores, reasons:
+
+- Key-value stores allow easy horizontal scaling. 便于水平扩展规模
+- Key-value stores provide very low latency to access data. 低延迟访问数据。
+- Relational databases do not handle long tail of data well. When the indexes grow large, random access is
+  expensive. 关系数据库随机读取能力差。
+- Key-value stores are adopted by other proven reliable chat applications. For example, both Facebook messenger and
+  Discord use key-value stores.
+	- Facebook messenger uses HBase,
+	- Discord uses Cassandra.
+
+#### Data models
+
+##### Message table for one-on-one chat
+
+| message      |           |             |
+|--------------|-----------|-------------|
+| message_id   | bigint    | primary key |
+| message_from | bigint    |             |
+| message_to   | bigint    |             |
+| content      | text      |             |
+| created_at   | timestamp |             |
+
+##### Message table for group chat
+
+| group_message |           |                      |
+|---------------|-----------|----------------------|
+| channel_id    | bigint    | combined primary key |
+| message_id    | bigint    | combined primary key |
+| user_id       | bigint    |                      |
+| content       | text      |                      |
+| created_at    | timestamp |                      |        
+
+##### Message ID
+
+Message_id carries the responsibility of ensuring the order of messages. To ascertain the order of messages, message_id
+must satisfy the following two requirements: 消息ID需要保证消息的顺序，ID的生成需要考虑：
+
+- IDs must be unique. 唯一性
+- IDs should be sortable by time, meaning new rows have higher IDs than old ones. 可排序性
+
+uuid4 虽然可以保证唯一性，但是不可以排序。之前章节的生成唯一ID（Twitter snowflake approach）可以参考，服务器ID+时间戳+自增ID。
+
+Local means IDs are only unique within a group. The reason why local IDs work is that maintaining message sequence
+within one-on-one channel or a group channel is sufficient. This approach is easier to implement in comparison to the
+global ID implementation. ID本地唯一性，用于一对一和群聊够了。
+
+### Step 3 - Design deep dive
+
+- service discovery,
+- messaging flows,
+- online/offline indicators
+
+#### Service discovery
+
+The primary role of service discovery is to recommend the best chat server for a client based on the criteria like
+geographical location, server capacity, etc
+
+Apache Zookeeper
+![](chat-service-dicovery-architecture.jpg)
+
+1. User A tries to log in to the app.
+2. The load balancer sends the login request to API servers.
+3. After the backend authenticates the user, service discovery finds the best chat server for User A. In this example,
+   server 2 is chosen and the server info is returned back to User A.
+4. User A connects to chat server 2 through WebSocket.
+
+#### Message flows
+
+##### 1 on 1 chat flow
+
+![](one-on-one-chat-flow-architecture.jpg)
+
+1. User A sends a chat message to Chat server 1.
+2. Chat server 1 obtains a message ID from the ID generator.
+3. Chat server 1 sends the message to the message sync queue.
+4. The message is stored in a key-value store.
+5. online or offline:
+	- If User B is online, the message is forwarded to Chat server 2 where User B is connected.
+	- If User B is offline, a push notification is sent from push notification (PN) servers.
+6. Chat server 2 forwards the message to User B. There is a persistent WebSocket connection between User B and Chat
+   server 2.
+
+##### Message synchronization across multiple devices
+
+![](message-sync-across-multiple-devices-architecture.jpg)
+
+Each device maintains a variable called cur_max_message_id, which keeps track of the latest message ID on the device.
+Messages that satisfy the following two conditions are considered as news messages: 每个设备本地单独维护一个当前最大消息ID
+
+- The recipient ID is equal to the currently logged-in user ID. 接收者ID是当前用户，说明是有新消息。
+- Message ID in the key-value store is larger than cur_max_message_id. 存储在KV中ID大于当前最大消息ID时候，说明需要同步消息。
+
+##### Small group chat flow
+
+![](group-chat-flow-sender-architecture.jpg)
+
+First, the message from User A is copied to each group member’s message sync queue: one for User B and the second for
+User C. You can think of the message sync queue as an inbox for a recipient. This design choice is good for small group
+chat because: 群聊中的消息同步队列，相当于每个用户的收件箱。
+
+- it simplifies message sync flow as each client only needs to check its own inbox to get new messages.
+- when the group number is small, storing a copy in each recipient’s inbox is not too expensive.
+  小规模的群聊，复制每一个消息副本到相应的收件人的信箱的存储成本不高，如果是大规模的群聊得考虑使用 message-ID 索引到消息体。
+
+WeChat uses a similar approach, and it limits a group to 500 members. However, for groups with a lot of users,
+storing a message copy for each member is not acceptable.
+
+![](group-chat-flow-recipient-architecture.jpg)
+On the recipient side, a recipient can receive messages from multiple users. Each recipient has an inbox
+(message sync queue) which contains messages from different senders.
+
+#### Online presence
+
+In the high-level design, presence servers are responsible for managing online status and communicating with clients
+through WebSocket.
+
+a few flows that will trigger online status change:
+
+- user login
+- user logout
+- User disconnection
+- online status fanout
+
+##### user login
+
+After a WebSocket connection is built between the client and the real-time service, user A’s online status and
+last_active_at timestamp are saved in the KV store. Presence indicator shows the user is online after she logs in.
+
+- online status
+- last_active_at
+
+##### user logout
+
+The online status is changed to offline in the KV store. The presence indicator shows a user is offline.
+
+##### User disconnection
+
+A naive way to handle user disconnection is to mark the user as offline and change the status to online when the
+connection re-establishes.
+
+However, this approach has a major flaw. It is common for users to disconnect and reconnect to the internet frequently
+in a short time.
+
+Updating online status on every disconnect/reconnect would make the presence indicator change too often, resulting in
+poor user experience.
+
+We introduce a heartbeat mechanism to solve this problem.
+Periodically, an online client sends a heartbeat event to presence servers. If presence servers receive a heartbeat
+event within a certain time, say x seconds from the client, a user is considered as online. Otherwise, it is offline.
+引入心跳机制，客户端定期向'在线状态服务'发送心跳，如果'在线状态服务'发现某个用户超出 n 秒没有心跳上来，那么就认定这个用户离线了。
+
+##### Online status fanout
+
+How do user A’s friends know about the status changes? 用户如何直到其他用户的是否在线的状态？
+
+Presence servers use a publish-subscribe model, in which each friend pair maintains a channel. When User A’s online
+status changes, it publishes the event to three channels, channel A-B, A-C, and A-D. Those three channels are subscribed
+by User B, C, and D, respectively. 发布订阅模式来通知用户状态给到其他朋友。
+The communication between clients and servers is through real-time WebSocket.
+因为用户聊天是websocket长连接，所以用户状态变更消息也与普通聊天消息一样，走websocket。
+
+WeChat uses a similar approach because its user group is capped to 500. For larger groups, informing all members about
+online status is expensive and time-consuming. 微信没有查看其他用户是否在线的状态的功能吧？？？群聊也看不出。
+
+Assume a group has 100,000 members. Each status change will generate 100,000 events. To solve the performance
+bottleneck, a possible solution is to fetch online status only when a user enters a group or manually refreshes the
+friend list. 群聊朋友多的情况下，采用 pull 的模式取代 push 模式。
+
+### Step 4 - Wrap up
+
+- chat servers for real-time messaging,
+- presence servers for managing online presence,
+- push notification servers for sending push notifications,
+- key-value stores for chat history persistence
+- API servers for other functionalities.
+
+additional talking points:
+
+- Extend the chat app to support media files such as photos and videos. Media files are significantly larger than text
+  in size. Compression, cloud storage, and thumbnails are interesting topics to talk about. 
+  支持聊天时候使用多媒体文件，压缩，云存储，缩略图等新功能需求。
+- End-to-end encryption. Whatsapp supports end-to-end encryption for messages. Only the sender and the recipient can
+  read messages. Interested readers should refer to the article in the reference materials. 端到端加密。密码学，对称加密算法和非对称加密算法。
+- Caching messages on the client-side is effective to reduce the data transfer between the client and server. 
+  客户端缓存消息，减轻对服务器端的压力。
+- Improve load time. Slack built a geographically distributed network to cache users’ data, channels, etc. for better
+  load time. 加快加载时间，可以基于地位位置的CDN缓存用户数据，群组数据。
+- Error handling.
+	- The chat server error. There might be hundreds of thousands, or even more persistent connections to a chat server.
+	  If a chat server goes offline, service discovery (Zookeeper) will provide a new chat server for clients to
+	  establish new connections with. 服务器宕机之后，如何转移这个服务器上的客户到新服务器上？
+	- Message resent mechanism. Retry and queueing are common techniques for resending messages. 
+	  消息重发，在网络环境不好的时候需要这个功能，在发送消息的时候在本地先缓存待发送消息，避免消息丢失，用户无法重发。
+
 ## References
 
 - "System Design Interview An Insider's Guide" by Alex Xu
