@@ -2224,11 +2224,11 @@ friend list. 群聊朋友多的情况下，采用 pull 的模式取代 push 模�
 additional talking points:
 
 - Extend the chat app to support media files such as photos and videos. Media files are significantly larger than text
-  in size. Compression, cloud storage, and thumbnails are interesting topics to talk about. 
+  in size. Compression, cloud storage, and thumbnails are interesting topics to talk about.
   支持聊天时候使用多媒体文件，压缩，云存储，缩略图等新功能需求。
 - End-to-end encryption. Whatsapp supports end-to-end encryption for messages. Only the sender and the recipient can
   read messages. Interested readers should refer to the article in the reference materials. 端到端加密。密码学，对称加密算法和非对称加密算法。
-- Caching messages on the client-side is effective to reduce the data transfer between the client and server. 
+- Caching messages on the client-side is effective to reduce the data transfer between the client and server.
   客户端缓存消息，减轻对服务器端的压力。
 - Improve load time. Slack built a geographically distributed network to cache users’ data, channels, etc. for better
   load time. 加快加载时间，可以基于地位位置的CDN缓存用户数据，群组数据。
@@ -2236,8 +2236,341 @@ additional talking points:
 	- The chat server error. There might be hundreds of thousands, or even more persistent connections to a chat server.
 	  If a chat server goes offline, service discovery (Zookeeper) will provide a new chat server for clients to
 	  establish new connections with. 服务器宕机之后，如何转移这个服务器上的客户到新服务器上？
-	- Message resent mechanism. Retry and queueing are common techniques for resending messages. 
+	- Message resent mechanism. Retry and queueing are common techniques for resending messages.
 	  消息重发，在网络环境不好的时候需要这个功能，在发送消息的时候在本地先缓存待发送消息，避免消息丢失，用户无法重发。
+
+## Chapter 13 Design a search autocomplete system 搜索自动提示填充
+
+typeahead, search-as-you-type, incremental search
+
+design top k, design top k most searched
+
+### Step 1 understand the problem and establish design scope
+
+```
+Candidate: Is the matching only supported at the beginning of a search query or in the middle as well?
+Interviewer: Only at the beginning of a search query. 搜索开始的时候提示
+Candidate: How many autocomplete suggestions should the system return?
+Interviewer: 5 5条候选项
+Candidate: How does the system know which 5 suggestions to return?
+Interviewer: This is determined by popularity, decided by the historical query frequency. 根据热度，历史查询频率
+Candidate: Does the system support spell check? 
+Interviewer: No, spell check or autocorrect is not supported. 不用检查语法错误
+Candidate: Are search queries in English? 
+Interviewer: Yes. If time allows at the end, we can discuss multi- language support. 英语，多语言支持
+Candidate: Do we allow capitalization and special characters? 
+Interviewer: No, we assume all search queries have lowercase alphabetic characters. 全部小写字母。
+Candidate: How many users use the product? Interviewer: 10 million DAU. 一千万日活用户 10,000,000/24/60/60 = 115 每秒用户数
+```
+
+requirements:
+
+- Fast response time: facebook response within 100 milliseconds 避免 stuttering 时断时续
+- Relevant: Autocomplete suggestions should be relevant to the search term. 相关性
+- Sorted: Results returned by the system must be sorted by popularity or other ranking models. 根据热度排序
+- Scalable: The system can handle high traffic volume. 支持高并发，支持规模扩展
+- Highly available: The system should remain available and accessible when part of the system is offline, slows down, or
+  experiences unexpected network errors. 高可用性，即使系统下线，卡顿，网络错误。
+
+#### Back of the envelope estimation
+
+- An average person performs 10 searches per day. 每个用户一天搜 10 条
+- 20 bytes of data per query string: 每条含有 20 字节
+	- 1 ASCII character = 1 byte
+	- 1 query contain 4 words, each words contains 5 characters on average. 4*5=20 bytes
+- For every character entered into the search box, a client sends a request to the backend for autocomplete suggestions.
+  On average, 20 requests are sent for each search query. 每输入一个字符就会触发一次自动填充的请求，那么每次查询平均会有
+  20 次请求。
+- 日活 1千万，日请求量request= 10,000,000*10*20 = 2,000,000,000
+  20亿次向服务端request请求。每秒请求数=2,000,000,000/24/60/60 = 23,148
+- Peak QPS = QPS * 2 = ~48,000. 峰值请求假设是2倍。
+- Assume 20% of the daily queries are new. 10 million * 10 queries / day * 20 byte per query * 20% = 0.4 GB.
+  This means 0.4GB of new data is added to storage daily. 假设1/5请求是新的请求，那么一天需要新增的存储空间是 0.4GB
+
+### Step 2 - Propose high-level design and get buy-in
+
+At the high-level, the system is broken down into two:
+
+- Data gathering service: It gathers user input queries and aggregates them in real-time. Real-time processing is not
+  practical for large data sets; however, it is a good starting point. We will explore a more realistic solution in deep
+  dive. 数据收集服务，实时收集用户查询历史
+- Query service: Given a search query or prefix, return 5 most frequently searched terms. 查询服务。
+
+#### Data gathering service
+
+{"query string":"frequency"}
+
+空格间隔单词，所以会避免掉无意义的字母组合。
+
+#### Query service
+
+加入查询频率表如下所示：
+
+| Query          | Frequency |
+|----------------|-----------|
+| twitter        | 35        |
+| twitch         | 29        |
+| twilight       | 25        |
+| twin peak      | 21        |
+| twitch prime   | 18        |
+| twitter search | 14        |
+| twillo         | 10        |
+| twin peak sf   | 8         |
+
+select * from frequency_table where query like `tw%` order by frequency desc limit 5;
+
+This is an acceptable solution when the data set is small. When it is large, accessing the database becomes a
+bottleneck.
+
+### Step 3 - Design deep dive
+
+The high-level design is not optimal 不是理想的。
+
+- Trie data structure. Trie树也叫做字典树，它是一个树形结构。 是一种专门处理字符串匹配的数据结构，用来解决在一组字符串集合中快速查找某个字符串。
+- Data gathering service 数据收集服务
+- Query service 查询服务
+- Scale the storage 扩展数据存储的规模
+- Trie operations
+
+#### Trie (pronounced “try”) data structure 介绍 Trie 数据结构
+
+Relational databases are used for storage in the high-level design. However, fetching the top 5 search queries from a
+relational database is inefficient. The data structure trie (prefix tree) is used to overcome the problem.
+前缀树
+
+The name comes from the word retrieval, which indicates it is designed for string retrieval operations.
+
+consists of:
+
+- A trie is a tree-like data structure. 树型结构
+- The root represents an empty string. 根节点是空的
+- Each node stores a character and has 26 children, one for each possible character.
+  To save space, we do not draw empty links. 一个节点会有26个子节点，代表26个英文字母。
+- Each tree node represents a single word or a prefix string.
+
+![](trie-tree-structure-example.jpg)
+
+To support sorting by frequency, frequency info needs to be included in nodes. 支持频率，需要把频率添加到节点中
+![](trie-tree-structure-example-with-frequency.jpg)
+
+define some terms:
+
+- p: length of a prefix 前缀的长度
+- n: total number of nodes in a trie 树中总的节点数
+- c: number of children of a given node 某个节点的子节点数
+
+Steps to get top k most searched queries are listed below:
+
+1. Find the prefix. Time complexity: O(p). 找到前缀
+2. Traverse the subtree from the prefix node to get all valid children. A child is valid if it can form a valid query
+   string. Time complexity: O(c) 从前缀节点往下查找所有子节点，如果子节点是合法单词就作为备选项。
+3. Sort the children and get top k. Time complexity: O(c*logc) 排序所有合法子节点，获取前五个高频的。
+
+时间复杂度 = O(p) + O(c) + O(clogc)
+
+```
+二叉树的高度
+
+1个节点， 高度为 1 log2(1)+1
+2-3个节点，高度为 2 log2(3)+1
+4-7个节点，高度为 3 log2(7)+1
+
+对数换底公式
+```
+
+The above algorithm is straightforward. However, it is too slow because we need to traverse the entire trie to get top k
+results in the worst-case scenario. Below are two optimizations: 还是太慢，在最坏的情况下，需要遍历所有树的节点
+
+1. Limit the max length of a prefix 限定最大前缀
+2. Cache top search queries at each node 缓存每个节点查询结果
+
+##### Limit the max length of a prefix
+
+Users rarely type a long search query into the search box. Thus, it is safe to say p is a small integer number, say 50.
+If we limit the length of a prefix, the time complexity for “Find the prefix” can be reduced from O(p) to
+O(small constant), aka O(1). 用户搜索时候不会使用太长的句子，限制前缀长度可行。
+
+##### Cache top search queries at each node
+
+To avoid traversing the whole trie, we store top k most frequently used queries at each node.
+
+Since 5 to 10 autocomplete suggestions are enough for users, k is a relatively small number.
+
+we significantly reduce the time complexity to retrieve the top 5 queries.
+However, this design requires a lot of space to store top queries at every node.
+Trading space for time is well worth it as fast response time is very important. 空间换时间，权衡取舍。
+
+![](trie-tree-structure-example-with-frequency-cached.jpg)
+
+1. Find the prefix node. Time complexity: O(1)
+2. Return top k. Since top k queries are cached, the time
+   complexity for this step is O(1).
+
+#### Data gathering service 数据收集服务
+
+In our previous design, whenever a user types a search query, data is updated in real-time. This approach is not
+practical for the following two reasons: 实时更新搜索历史不可行。
+
+- Users may enter billions of queries per day. Updating the trie on every query significantly slows down the query
+  service. 用户每天查询数十亿次，每次都更新树会减慢查询速度（因为需要重构top k 并缓存）
+- Top suggestions may not change much once the trie is built. Thus, it is unnecessary to update the trie frequently.
+  前 k 个高频搜索可能更改不频繁。
+
+To design a scalable data gathering service, we examine where data comes from and how data is used. 需要衡量数据来源，和数据使用场景
+
+- Real-time applications like Twitter require up-to-date autocomplete suggestions. 推特热点需要实时更新
+- However, autocomplete suggestions for many Google keywords might not change much on a daily basis. 谷歌搜索不需要实时更新
+
+data used to build the trie is usually from analytics or logging services. 需要从分析和日志服务中构建热词树
+
+![](trie-db-data-gather.jpg)
+
+##### Analytics Logs. 分析日志
+
+It stores raw data about search queries. Logs are append-only and are not indexed.
+
+| query | time                |
+|-------|---------------------|
+| tree  | 2024-06-04 14:01:01 |
+| try   | 2024-06-04 14:01:02 |
+
+##### Aggregators. 聚合器
+
+The size of analytics logs is usually very large, and data is not in the right format. We need to aggregate data so
+it can be easily processed by our system. 日志数据需要聚合处理，来便于分析
+
+- For real-time applications such as Twitter, we aggregate data in a shorter time interval as real-time results are
+  important. 推特需要短的时间间隔去聚合数据
+- On the other hand, aggregating data less frequently, say once per week, might be good enough for many use cases.
+- During an interview session, verify whether real-time results are important. 确定是否实时聚合日志在面试中很重要。
+
+##### Aggregated Data. 聚合后的数据
+
+aggregated weekly data.
+
+- “time” field represents the start time of a week.
+- “frequency” field is the sum of the occurrences for the corresponding query in that week.
+
+| query | time      | frequency |
+|-------|-----------|-----------|
+| tree  | 2019-10-1 | 12000     |
+| tree  | 2019-10-8 | 15000     |
+
+##### Workers.
+
+Workers are a set of servers that perform asynchronous jobs at regular intervals. They build the trie data structure and
+store it in Trie DB.
+
+##### Trie Cache.
+
+Trie Cache is a distributed cache system that keeps trie in memory for fast read. It takes a weekly snapshot of the DB.
+分布式缓存存储，每周对Trie树数据库一个快照进行备份，存储在缓存中。
+
+##### Trie DB.
+
+Trie DB is the persistent storage. Two options are available to store the data:
+
+1. Document store: Since a new trie is built weekly, we can periodically take a snapshot of it, serialize it, and store
+   the serialized data in the database. Document stores like MongoDB are good fits for serialized data. 文档存储，方便于快照，序列化
+2. Key-value store: A trie can be represented in a hash table form by applying the following logic: 键值对存储
+	- Every prefix in the trie is mapped to a key in a hash table. 前缀映射到 key
+	- Data on each trie node is mapped to a value in a hash table. Trie树上的 data 存储在 value 中。指的是可能的关键词以及他们的频率。
+
+![](trie-db-data-kv-structure.jpg)
+
+#### Query service 查询服务
+
+1. A search query is sent to the load balancer.
+2. The load balancer routes the request to API servers.
+3. API servers get trie data from Trie Cache and construct autocomplete suggestions for the client.
+4. In case the data is not in Trie Cache, we replenish 再填满 data back to the cache. This way, all subsequent requests
+   for the same prefix are returned from the cache.
+   A cache miss can happen when a cache server is out of memory or offline. 内存耗光和缓存挂掉会导致缓存未命中，那就需要去数据库中取数据
+
+加快查询速度的方法：
+
+- AJAX request
+- Browser caching.
+  ![](browser-cache-auto-complete-search-header.jpg)
+  ![](browser-cache-auto-complete-search-payload.jpg)
+  ![](browser-cache-auto-complete-search-response.jpg)
+	- “private” in cache-control means results are intended for a single user and must not be cached by a shared cache.
+	- “max-age=3600” means the cache is valid for 3600 seconds, aka, an hour.
+- Data sampling: For instance, only 1 out of every N requests is logged by the system. 给查询历史抽样存储样本，存储用户所有查询耗费大量能源和存储空间。
+
+#### Trie operations
+
+##### Create
+
+Trie is created by workers using aggregated data. The source of data is from Analytics Log/DB.
+
+##### Update
+
+There are two ways to update the trie.
+
+- Option 1: Update the trie weekly. Once a new trie is created, the new trie replaces the old one. 每周更新Trie树节点。
+- Option 2: Update individual trie node directly. We try to avoid this operation because it is slow. However, if the
+  size of the trie is small, it is an acceptable solution. 每次查询都都更新Trie树，系统规模小的时候可以采用。
+	- When we update a trie node, its ancestors all the way up to the root must be updated because ancestors store top
+	  queries of children. 更新子节点需要同步更新父节点，因为父节点存储了它的子节点上的有效关键词和关键词的频率数据。
+	  ![](update-trie-tree.jpg)
+
+##### Delete
+
+We have to remove hateful, violent, sexually explicit, or dangerous autocomplete suggestions. We add a filter layer
+增加过滤器删除不符合道德的词，
+
+- 过滤器可以在存入Trie树之前过滤掉不合规的关键词，避免删除Trie节点数据带来的麻烦。
+- 过滤器也可以在取Trie 缓存之后，返回给用户之前进行过滤。
+	- Having a filter layer gives us the flexibility of removing results based on different filter rules
+	  这种的好处是可以兼容各个不同国家的不同政策，存储所有的热点词，但是有些国家或地区需要，有些国家或地区禁止。灵活性
+
+##### Scale the storage
+
+Since English is the only supported language, a naive way to shard is based on the first character. Here are some
+examples. 数据库切片分区，基于首字母，但是单词中首字母分布不是均匀的。
+但是也许 t开头的单词比 o 开头的单词多很多，关键词的也会相应的多很多。会导致服务器负载不均衡。
+
+- If we need two servers for storage, we can store queries starting with ‘a’ to ‘m’ on the first server, and ‘n’ to ‘z’
+  on the second server.
+- If we need three servers, we can split queries into ‘a’ to ‘i’, ‘j’ to ‘r’ and ‘s’ to ‘z’.
+
+最多可以分 26 个服务器来存储Trie数据，因为有 26个字母，继续扩大规模的话就要根据前两个字母的组合来切片分区，以此类推。
+
+为了解决以上字母分布不均匀的问题：
+
+The shard map manager maintains a lookup database for identifying where rows should be stored.
+For example, if there are a similar number of historical queries for ‘s’ and for ‘u’, ‘v’, ‘w’, ‘x’, ‘y’ and ‘z’
+combined, we can maintain two shards: one for ‘s’ and one for ‘u’ to ‘z’.
+![](trie-db-shard-map-system.jpg)
+
+### Step 4 Wrap up
+
+- Interviewer: How do you extend your design to support multiple languages? 多语言支持
+
+  To support other non-English queries, we store Unicode characters in trie nodes. 从 ascii 码转为 unicode 码，或者 utf-8
+
+- Interviewer: What if top search queries in one country are different from others? 给不同国家做不同搜索热度推荐
+
+  In this case, we might build different tries for different countries. To improve the response time, we can store tries
+  in CDNs.
+
+- Interviewer: How can we support the trending (real-time) search queries? 支持实时趋势查询，例如爆炸性的新闻
+
+  Assuming a news event breaks out, a search query suddenly becomes popular. Our original design will not work because:
+	- Offline workers are not scheduled to update the trie yet because this is scheduled to run on weekly basis.
+	  workers 一周才更新一次 Trie 树
+	- Even if it is scheduled, it takes too long to build the trie. 重新构建 Trie 数据库需要耗费大量时间。
+
+  思路：
+  - Reduce the working data set by sharding. 分片存储越细越好，数据集小更新就快一些。
+  - Change the ranking model and assign more weight to recent search queries. 增加最新搜索的在排名中的权重
+  - Data may come as streams, so we do not have access to all the data at once. Streaming data means data is generated
+  continuously. Stream processing requires a different set of systems: 流处理
+    - Apache Hadoop MapReduce 
+    - Apache Spark Streaming 
+    - Apache Storm 
+    - Apache Kafka
 
 ## References
 
