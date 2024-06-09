@@ -728,7 +728,7 @@ D1[S1,1] -> D2[S1,2] -> | -> D3([S1,2],[S2,1]) server2 改了       -> |
 you can tell that a version X is a sibling (i.e., a conflict exists) of Y if there is any participant in Y's vector
 clock who has a counter that is less than its corresponding counter in X. For example, the following two vector clocks
 indicate there is a conflict: D([s0, 1], [s1, 2]) and D([s0, 2], [s1, 1]).
-如果有某个数据某个版本号大于响应的另一个节点上，同时有其他版本号小于那个节点上，那么就是有冲突了。
+如果有某个数据某个版本号大于相应的另一个节点上，同时有其他版本号小于那个节点上，那么就是有冲突了。
 
 缺点：
 
@@ -742,7 +742,7 @@ indicate there is a conflict: D([s0, 1], [s1, 2]) and D([s0, 2], [s1, 1]).
 gossip protocol. 检测到某个服务器下线，需要多个服务器共同确认
 
 - Each node maintains a node membership list, which contains member IDs and heartbeat counters.
-  每个节点维护一个 成员节点列表，（id， counter）
+  每个节点维护一个 成员节点列表和心跳计数，（id， counter）
 - Each node periodically increments its heartbeat counter. 每个节点周期性增加心跳计数
 - Each node periodically sends heartbeats to a set of random nodes, which in turn propagate to another set of nodes.
   每个节点周期性的发送心跳到其他随机的节点
@@ -754,8 +754,9 @@ gossip protocol. 检测到某个服务器下线，需要多个服务器共同确
 	- Node s0 sends heartbeats that include s2’s info to a set of random nodes.
 	- Once other nodes confirm that s2’s heartbeat counter has not been updated for a long time,
 	- node s2 is marked down, and this information is propagated to other nodes.
-	  例如 Sever1 发现 server2 的counter 好久不增加了，它把 server2的心跳数据 发给其他服务器节点，如果得到肯定的答复，
+	  例如 Server1 发现 server2 的counter 好久不增加了，它把 server2的心跳数据 发给其他服务器节点，如果得到肯定的答复，
 	  那么把 server2 标记为下线，并同步这条消息到其他节点，使集群直到 server2 下线了。
+	  这么做防止 server1 自己的网络不稳定，掉线了，认为其他节点掉线了。
 
 ##### handling temporary failure
 
@@ -769,29 +770,28 @@ If a server is unavailable due to network or server failures, another server wil
 the down server is up, changes will be pushed back to achieve data consistency. This process is called hinted handoff.
 如果一个节点挂了，其他节点临时接手处理请求，当节点恢复之后，修改的数据会推送到该节点，以维持一致性。 提示性的接力
 
-##### Handling permanent failures
+##### Handling permanent failures 永久错误，那就需要同步节点数据。
 
 implement an anti-entropy 反熵 protocol to keep replicas in sync.
 
-- Anti-entropy involves comparing each piece of data on replicas
-- and updating each replica to the newest version.
-- A Merkle tree（是一个二叉树） is used for inconsistency detection and minimizing the amount of data transferred.
+- Anti-entropy involves comparing each piece of data on replicas 反熵需要比较各个树的节点数据
+- and updating each replica to the newest version. 然后同步各个树的节点数据到最新的数据。
+- A **Merkle tree**（是一个二叉树） is used for inconsistency detection and minimizing the amount of data transferred.
   Divide key space into buckets 把key空间分成一个个桶，每个桶里面最大容纳 n 个 key。用统一的 hash 函数给每个桶里面的数据计算
   hash，基于这些 hash 再给 桶 bucket 计算 hash
-  根节点计算的 hash 包括所有子节点的hash信息，如果子节点变化了，它的hash就会变，同时根节点的 hash也会变化。
-  那么只需要比较根节点就可以直到两个树是否相等。对写不友好，对读友好。
-  如果根节点不一样，再比较两个子节点，以此类推递归找到不同的子节点，并同步更新它们。
+  根节点计算的 hash 包括所有子节点的hash信息，如果子节点变化了，它的 hash值 就会变，同时根节点的 hash值 也会变化。
+  那么只需要比较根节点就可以知道两个树是否相等。这种方案对写不友好，对读友好。
+  如果根节点不一样，再比较两个子节点，以此类推递归找到不同的子节点，并同步更新它们。对于相同的节点就不需要深入的遍历它。
   因此可以成比例的同步不同的数据，而不是整个bucket的数据。
 
 #### system architecture
 
-- Clients communicate with the key-value store through simple
-  APIs: get(key) and put(key, value).
-- A coordinator is a node that acts as a proxy between the client
-  and the key-value store.
-- Nodes are distributed on a ring using consistent hashing.
+- Clients communicate with the key-value store through simple APIs: get(key) and put(key, value). 通过 get put API接口交互
+- A coordinator is a node that acts as a proxy between the client and the key-value store.
+  协调者也是一个普通节点，充当代理的作用。查询数据的时候通过多数投票验证数据有效性，再返回给客户端。更新数据的时候，验证数据版本向量，更新数据。
+- Nodes are distributed on a ring using consistent hashing. 每一个服务器节点都在一致性哈希环上面，为了均衡负载，给不同节点添加不同权重，并根据权重生成虚拟节点。
 - The system is completely decentralized so adding and moving nodes can be automatic.
-- Data is replicated at multiple nodes.
+- Data is replicated at multiple nodes. 数据被复制到一致性哈希环上的相邻节点，节点需要避免选择虚拟节点。
 - There is no single point of failure as every node has the same set of responsibilities.
 
 #### write path
@@ -2563,14 +2563,401 @@ combined, we can maintain two shards: one for ‘s’ and one for ‘u’ to ‘
 	- Even if it is scheduled, it takes too long to build the trie. 重新构建 Trie 数据库需要耗费大量时间。
 
   思路：
-  - Reduce the working data set by sharding. 分片存储越细越好，数据集小更新就快一些。
-  - Change the ranking model and assign more weight to recent search queries. 增加最新搜索的在排名中的权重
-  - Data may come as streams, so we do not have access to all the data at once. Streaming data means data is generated
-  continuously. Stream processing requires a different set of systems: 流处理
-    - Apache Hadoop MapReduce 
-    - Apache Spark Streaming 
-    - Apache Storm 
-    - Apache Kafka
+	- Reduce the working data set by sharding. 分片存储越细越好，数据集小更新就快一些。
+	- Change the ranking model and assign more weight to recent search queries. 增加最新搜索的在排名中的权重
+	- Data may come as streams, so we do not have access to all the data at once. Streaming data means data is generated
+	  continuously. Stream processing requires a different set of systems: 流处理
+		- Apache Hadoop MapReduce
+		- Apache Spark Streaming
+		- Apache Storm
+		- Apache Kafka
+
+## Chapter 14: Design Youtube
+
+video sharing platform, Netflix, Hulu
+
+- Total number of monthly active users: 2 billion. 月活用户 20亿
+- Number of videos watched per day: 5 billion. 一天看了 50亿视频
+- 73% of US adults use YouTube.
+- 50 million creators on YouTube. 5千万上传者
+- YouTube’s Ad revenue was $15.1 billion for the full year 2019, up 36% from 2018. 全年广告收入 151亿
+- YouTube is responsible for 37% of all mobile internet traffic. 占据手机网络 37% 流量
+- YouTube is available in 80 different languages. 80种语言
+
+### Step 1 - Understand the problem and establish design scope
+
+```
+Candidate: What features are important?
+Interviewer: Ability to upload a video and watch a video. 上传和观看视频
+Candidate: What clients do we need to support? 
+Interviewer: Mobile apps, web browsers, and smart TV. 客户端包括手机app，浏览器，智能电视
+Candidate: How many daily active users do we have? 
+Interviewer: 5 million 日活 500万
+Candidate: What is the average daily time spent on the product? 
+Interviewer: 30 minutes. 每个用户每天平均花费 30 分钟在油管上
+Candidate: Do we need to support international users? 
+Interviewer: Yes, a large percentage of users are international users. 多语言支持
+Candidate: What are the supported video resolutions? 
+Interviewer: The system accepts most of the video resolutions and formats. 支持多种格式的视频上传，要可以转码
+Candidate: Is encryption required? 
+Interviewer: Yes 加密？对什么加密？
+Candidate: Any file size requirement for videos?
+Interviewer: Our platform focuses on small and medium-sized videos. The maximum allowed video size is 1GB. 最大视频大小 1GB
+Candidate: Can we leverage some of the existing cloud infrastructures provided by Amazon, Google, or Microsoft? 
+Interviewer: That is a great question. Building everything from scratch is unrealistic for most companies, 
+it is recommended to leverage some of the existing cloud services. 可以利用现成的云计算基础设施服务
+```
+
+- Ability to upload videos fast 可以快速的上传视频
+- Smooth video streaming 视频观看要流畅，不能卡顿
+- Ability to change video quality 可以改变视频流清晰度质量。
+- Low infrastructure cost 低云计算基础设施消耗成本
+- High availability, scalability, and reliability requirements 高可用，规模可扩性，稳定性
+- Clients supported: mobile apps, web browser, and smart TV 多客户端支持
+
+#### Back of the envelope estimation
+
+- Assume the product has 5 million daily active users (DAU). 日活 500万
+- Users watch 5 videos per day. 每个人看 5个视频
+- 10% of users upload 1 video per day. 每天有十分之一用户上传视频
+- Assume the average video size is 300 MB. 假设视频大小 300MB 300MB*5,000,000*0.1=150TB
+- Total daily storage space needed: 5 million * 10% * 300 MB = 150TB
+- CDN cost.
+	- When cloud CDN serves a video, you are charged for data transferred out of the CDN.
+	- Let us use Amazon’s CDN CloudFront for cost estimation. Assume 100% of traffic is served from the United States.
+	  The average cost per GB is $0.02. For simplicity, we only calculate the cost of video streaming.
+	- 5 million * 5 videos * 0.3GB * $0.02 = $150,000 per day.
+
+### Step 2 - Propose high-level design and get buy-in
+
+CDN and blob 一滴 一团 storage are the cloud services we will leverage.
+
+- System design interviews are not about building everything from scratch. Within the limited time frame, choosing the
+  right technology to do a job right is more important than explaining how the technology works in detail. For instance,
+  mentioning blob storage for storing source videos is enough for the interview. Talking about the detailed design for
+  blob storage could be an overkill. 系统设计面试不是考察重新造轮子的，有限的时间里面选择合适的技术来完成工作比解释技术细节如何实现来的重要。
+- Building scalable blob storage or CDN is extremely complex and costly. Even large companies like Netflix or
+  Facebook do not build everything themselves.
+	- Netflix leverages Amazon’s cloud services,
+	- Facebook uses Akamai’s CDN .
+
+```
+client ->| streaming video -> CDN
+       ->| everything else -> API servers
+```
+
+CDN: Videos are stored in CDN. When you press play, a video is streamed from the CDN.
+
+API servers: Everything else except video streaming goes through API servers.
+This includes
+
+- feed recommendation, 订阅推荐
+- generating video upload URL, 生成新上传视频地址
+- updating metadata database and cache, 更新元数据库和缓存
+- user signup, 用户注册和登录
+
+#### Video uploading flow
+
+![](video-upload-flow-architecture.jpg)
+components:
+
+- API servers: All user requests go through API servers except video streaming.
+- Metadata DB: Video metadata are stored in Metadata DB. It is sharded and replicated to meet performance and high
+  availability requirements. 分片存储提升性能，主从备份提升可用性，
+- Metadata cache: For better performance, video metadata and user objects are cached.
+- Original storage: A blob storage system is used to store original videos. A quotation in Wikipedia regarding blob
+  storage shows that: “A Binary Large Object (BLOB) is a collection of binary data stored as a single entity in a
+  database management system”. 大的二进制对象BLOB 是一个存储二进制数据为单个实体的数据库管理系统。
+- Transcoding servers: Video transcoding is also called video encoding. It is the process of converting a video format
+  to other formats (MPEG, HLS, etc), which provide the best video streams possible for different devices and bandwidth
+  capabilities. 视频转码，也叫视频编码，有些格式对于在线视频流更加友好，提升观看体验。
+- Transcoded storage: It is a blob storage that stores transcoded video files. 存储转码后的文件，原文件不删除？
+- Completion queue: It is a message queue that stores information about video transcoding completion events. 转码状态队列
+- Completion handler: This consists of a list of workers that pull event data from the completion queue and update
+  metadata cache and database. workers 从转码队列里面拉取任务，并进行转码
+
+The flow is broken down into two processes running in parallel. 上传有两个并行任务
+
+- Upload the actual video. 上传实际视频文件
+- Update video metadata. Metadata contains information about video URL, size, resolution, format, user info, etc.
+  更新视频元数据
+
+##### Flow A: Upload the actual video
+
+![](video-upload-flow-architecture-detail.jpg)
+
+1. Videos are uploaded to the original storage. 视频上传到原始存储的位置
+2. Transcoding servers fetch videos from the original storage and start transcoding. 转码器拉取视频并进行转码。
+3. Once transcoding is complete, the following two steps are executed in parallel: 转码完成执行以下并行任务
+	- 3a. Transcoded videos are sent to transcoded storage. 任务一是把转码后的视频存储到单独的存储单元中。
+		- 3a.1. Transcoded videos are distributed to CDN. 转码的视频分发到各个 CDN 服务器。
+	- 3b. Transcoding completion events are queued in the completion queue. 转码完成的消息通知放到消息队列中，用于通知上传者或者订阅者。
+		- 3b.1. Completion handler contains a bunch of workers that continuously pull event data from the queue.
+		  完成转码处理器定期拉取队列里面的消息，并处理，包括更新缓存和数据库中的视频元数据。
+		- 3b.1.a. and 3b.1.b. Completion handler updates the metadata database and cache when video transcoding is
+		  complete.
+4. API servers inform the client that the video is successfully uploaded and is ready for streaming. API通知客户端上传完成。
+
+##### Flow B: Update the metadata
+
+While a file is being uploaded to the original storage, the client in parallel sends a request to update the video
+metadata. The request contains video metadata, including file name, size, format, etc. API
+servers update the metadata cache and database.
+
+#### Video streaming flow
+
+Downloading means the whole video is copied to your device, while streaming means your device continuously receives
+video streams from remote source videos.
+
+streaming video:
+
+- immediately
+- continuously
+
+streaming protocol:
+
+- MPEG–DASH.
+	- MPEG stands for “Moving Picture Experts Group”
+	- DASH stands for "Dynamic Adaptive Streaming over HTTP".
+- Apple HLS.
+	- HLS stands for “HTTP Live Streaming”.
+- Microsoft Smooth Streaming.
+- Adobe HTTP Dynamic Streaming (HDS).
+
+### Step 3 - Design deep dive
+
+#### Video transcoding
+
+If you want the video to be played smoothly on other devices, the video must be encoded into compatible bitrates 比特速率
+and formats.
+
+Bitrate is the rate at which bits are processed over time. A higher bitrate generally means higher video quality. High
+bitrate streams need more processing power and fast internet speed.
+
+转码的原因：
+
+- 原始视频占据大量空间
+- 不同设备或者浏览器支持少数的几种视频格式
+- 最大化用户流畅播放体验与视频清晰度，对于带宽高的用户使用高清晰度转码视频，低带宽bandwidth使用低清晰度。
+- 网络环境会抖动，清晰度需要根据网络质量进行动态调整。 smooth playback 流畅的播放体验。
+
+编码格式包括两部分：
+
+- container 容器:
+	- .avi
+	- .mov
+	- .mp4
+- codecs 编码: These are compression and decompression algorithms aim to reduce the video size while preserving the
+  video
+  quality. The most used video codecs are:
+	- H.264,
+	- VP9,
+	- HEVC.
+
+#### Directed acyclic 非周期的 graph (DAG) model
+
+Transcoding a video is computationally expensive and time-consuming.视频转码是计算密集型和耗时的任务。
+
+- 要求有水印 watermarks
+- 自定义缩略图 thumbnail images
+- 高清视频 high definition
+
+- 不同处理管道 different video processing pipelines
+- 高度的并行 maintain high parallelism
+
+Facebook’s streaming video engine uses a directed acyclic graph (DAG) programming model,
+which defines tasks in stages so they can be executed sequentially or parallelly 平行地
+
+![](video-transcoding-directed-acyclic-graph-model.jpg)
+
+some tasks:
+
+- Inspection: Make sure videos have good quality and are not malformed 畸形的. 检查视频质量，避免畸形的视频。
+- Video encodings: Videos are converted to support different resolutions, codec, bitrates, etc.
+  example of video encoded files:
+	- 360p.mp4
+	- 480p.mp4
+	- 720p.mp4
+	- 1080p.mp4
+	- 4k.mp4
+- Thumbnail. Thumbnails can either be uploaded by a user or automatically generated by the system. 可以系统自动生成缩略图或者用户自定义。
+- Watermark: An image overlay on top of your video contains identifying information about your video. 水印标注版权
+
+#### Video transcoding architecture
+
+![](video-transcoding-architecture.jpg)
+
+- Preprocessor 预处理器
+- DAG scheduler DAG日程安排
+- Resource manager 资源管理器
+- Task workers 任务工人
+- Temporary storage 临时存储
+
+##### Preprocessor
+
+1. Video splitting. 视频分割。视频流是分割视频为一段小的图片帧 Group of Pictures(GOP) alignment
+	- GOP is a group/chunk of frames arranged in a specific order. GOP 是特殊顺序的一组帧
+	- Each chunk is an independently playable unit, usually a few seconds in length. 每一组都是独立的可播放单元，几秒长。
+2. Some old mobile devices or browsers might not support video splitting. Preprocessor split videos by GOP alignment
+   for old clients. 兼容老设备。
+3. DAG generation. The processor generates DAG based on configuration files client programmers write.
+4. Cache data. The preprocessor is a cache for segmented videos. For better reliability, the preprocessor stores GOPs
+   and metadata in temporary storage. If video encoding fails, the system could use persisted data for retry
+   operations. 利用缓存进行临时文件存储，也方便转码失败重试。
+
+##### DAG scheduler
+
+![](directed-acyclic-graph-scheduler-architecture.jpg)
+
+##### Resource manager
+
+- Task queue: It is a priority queue that contains tasks to be executed. 任务队列安排优先级
+- Worker queue: It is a priority queue that contains worker utilization info. 工人队列
+- Running queue: It contains info about the currently running tasks and workers running the tasks. 正在执行的任务和工人
+- Task scheduler: It picks the optimal task/worker, and instructs the chosen task worker to execute the job.
+  挑选当时最优的工人和任务去执行。
+
+![](video-transcoding-resource-manager-architecture.jpg)
+
+work flow:
+
+- The task scheduler gets the highest priority task from the task queue.
+- The task scheduler gets the optimal task worker to run the task from the worker queue.
+- The task scheduler instructs the chosen task worker to run the task.
+- The task scheduler binds the task/worker info and puts it in the running queue.
+- The task scheduler removes the job from the running queue once the job is done.
+
+##### Task workers
+
+Different task workers may run different tasks:
+
+- watermark workers
+- encoder workers
+- thumbnail workers
+- merger workers
+
+##### Temporary storage
+
+Multiple storage systems are used here:
+
+- metadata is frequently accessed by workers, and the data size is usually small. Thus, caching metadata in memory is
+  a good idea. 视频元数据频繁被使用，并且存储空间占用小，需要放在内存中。
+- For video or audio data, we put them in blob storage. 视频和音频占用存储空间大，需要放到大的二进制存储中。
+- Data in temporary storage is freed up once the corresponding video processing is complete.
+  视频转码相应的工作完成之后，临时存储中的数据被清空，腾出空间以备后用。
+
+#### System optimizations
+
+##### Speed optimization: parallelize video uploading
+
+Uploading a video as a whole unit is inefficient. We can split a video into smaller chunks by GOP alignment
+上传视频文件时候把文件分割成不同的块，并行的上传，上传完成之后再拼接成完整视频。
+
+```
+[original video] ----> split by GOP alignment ---> [|GOP 1|GOP 2|...|GPP N|]
+```
+
+This allows fast resumable uploads when the previous upload failed. 断点续传
+
+##### Speed optimization: place upload centers close to users
+
+选择地理上靠近用户的上传中心，让用户上传。提升上传速度。
+
+use CDN as upload centers
+
+##### Speed optimization: parallelism everywhere
+
+Achieving low latency
+
+- loosely coupled 松耦合
+	- message queues
+- high parallelism 高并行
+	- publisher and subscriber
+
+```
+[original storage] ---> [message queue] ---> [download module] --->[message queue]--->[encoding module]
+---> [message queue] ---> [upload module] ---> [message queue] ---> [encoded storage] --->upload encoded videos 
+---> CDN
+```
+
+##### Safety optimization: pre-signed upload URL 安全性优化，不直接暴露上传接口地址，为每一个用户生成一个签名的上传地址
+
+1. The client makes a HTTP request to API servers to fetch the pre-signed URL,
+   which gives the access permission to the object identified in the URL.
+   The term pre-signed URL is used by uploading files to Amazon S3 (or other third-party service provider).
+2. API servers respond with a pre-signed URL.
+3. Once the client receives the response, it uploads the video using the pre-signed URL.
+
+##### Safety optimization: protect your videos
+
+- Digital rights management (DRM) systems: Three major DRM systems are 数字版权管理
+	- Apple FairPlay,
+	- Google Widevine,
+	- Microsoft PlayReady.
+- AES encryption: You can encrypt a video and configure an authorization policy. The encrypted video will be decrypted
+  upon playback. This ensures that only authorized users can watch an encrypted video. 视频加密，如果全文件加密可能耗费计算资源
+- Visual watermarking: This is an image overlay on top of your video that contains identifying information for your
+  video. It can be your company logo or company name. 水印。
+
+##### Cost-saving optimization 成本优化
+
+YouTube video streams follow long-tail distribution. 2/8原则
+
+- a few popular videos are accessed frequently 存在 CDN 上
+- but many others have few or no viewers 存在自己的服务器上
+
+2. For less popular content, we may not need to store many encoded video versions. Short videos can be encoded
+   on-demand.
+   对于不频繁访问的内容，转码的清晰度也避免过多，可以存一两种清晰度即可。
+3. Some videos are popular only in certain regions. There is no need to distribute these videos to other regions.
+   局部地区或者国家频繁访问的内容只部署在那个地区或者国家的本地 CDN 上。
+4. Build your own CDN。 和 ISP(Internet service providers 网络运营商) 合作建立 CDN。 ISPs are located all around the world
+   and are close to users.
+	- 中国移动
+	- 中国联通
+	- 中国电信
+	- Comcast
+	- AT&T
+	- Verizon
+
+#### Error handling 错误处理
+
+- Recoverable error, retry a few times.If the task continues to fail and the system believes it is not recoverable, it
+  returns a proper error code to the client. 可恢复错误就是重试，重试几次都失败判定不可恢复，返回错误给客户端
+- Non-recoverable error. 停止运行任务，返回错误给客户端
+
+- 上传错误：重试几次
+- 分割视频错误：客户端版本太老无法执行的话，那么就放到服务端进行分割。
+- 转码错误：重试
+- 预处理错误 preprocessor error：重新生成 DAG 图
+- DAG scheduler DAG计划表错误： 重新计划个任务 reschedule a task
+- Resource manager queue down 队列下线：启动备份队列
+- Task worker down：在其他worker 上重新执行任务
+- API server down： 重定向请求到其他 API 服务器，stateless无状态
+- Metadata cache server down：启动新的缓存服务来代替
+- Metadata DB server down：
+	- 主节点挂掉，从节点选出新的主节点。
+	- 从节点挂掉，用其他从节点代替，并且重启启动一个新的从节点。
+
+### Step 4 - Wrap up
+
+- Live streaming 在线直播: It refers to the process of how a video is recorded and broadcasted in real time. live
+  streaming and non-live streaming have some
+	- similarities: 相同点
+		- both require uploading, 上传
+		- encoding, 转码
+		- streaming. 视频流
+	- The notable differences are: 不同点
+		- Live streaming has a higher latency requirement, so it might need a different streaming protocol. 在线直播要求低延迟
+		- Live streaming has a lower requirement for parallelism because small chunks of data are already processed in
+		  real-time. 对并行要求不高，因为直播过程中就在产生一段段小的视频段。
+		- Live streaming requires different sets of error handling. Any error handling that takes too much time is not
+		  acceptable. 直播对错误容忍度低。
+
+- Video takedowns: Videos that violate copyrights, pornography, or other illegal acts shall be removed. Some can be
+  discovered by the system during the upload process, while others might be discovered through user flagging.
+	- 侵权，色情，非法视频需要在上传过程中就拦截掉，避免浪费服务器资源。
+		- 对于已经上传的违法视频，需要用户标记投诉进行删除。
 
 ## References
 
