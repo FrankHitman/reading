@@ -2959,6 +2959,418 @@ YouTube video streams follow long-tail distribution. 2/8原则
 	- 侵权，色情，非法视频需要在上传过程中就拦截掉，避免浪费服务器资源。
 		- 对于已经上传的违法视频，需要用户标记投诉进行删除。
 
+## Chapter 15: Design Google Drive
+
+Google Drive is a file storage and synchronization service that helps you store documents, photos, videos, and other
+files in the cloud.
+
+- 文件存储
+- 文件同步
+
+### Step 1 - Understand the problem and establish design scope
+
+```
+Candidate: What are the most important features?
+Interviewer: Upload and download files, file sync, and notifications. 上传，下载，同步，通知
+Candidate: Is this a mobile app, a web app, or both? 
+Interviewer: Both. 网页端与手机app端都做
+Candidate: What are the supported file formats? 
+Interviewer: Any file type. 所有格式的文件都要支持
+Candidate: Do files need to be encrypted?
+Interview: Yes, files in the storage must be encrypted. 文件需要加密
+Candidate: Is there a file size limit?
+Interview: Yes, files must be 10 GB or smaller. 文件不大于 10 GB
+Candidate: How many users does the product have? 
+Interviewer: 10M DAU. 一千万日活用户
+
+```
+
+- 上传，下载，多终端同步
+- See file revisions.
+- Share files with your friends, family, and coworkers
+- Send a notification when a file is edited, deleted, or shared with you.
+- 可靠性
+- 快速同步
+- 带宽占用不能太多
+- 可扩展规模
+- 高可用
+
+#### 估算 back of the envelope estimation
+
+- Assume the application has 50 million signed up users and 10 million DAU. 5千万注册用户，2千万日活
+- Users get 10 GB free space. 每个用户最大可用空间 10GB
+- Assume users upload 2 files per day. The average file size is 500 KB. 每个用户每天上传2个文件，每个文件平均 500 KB 20M
+  *2*500KB = 20TB 每天
+- 1:1 read to write ratio.
+- Total space allocated: 50 million * 10 GB = 500 Petabyte
+- QPS for upload API: 10 million * 2 uploads / 24 hours / 3600 seconds = ~ 240
+- Peak QPS = QPS * 2 = 480
+
+### Step 2 - Propose high-level design and get buy-in
+
+simple -> scale up ->
+
+简单方案：
+
+- a web server to upload and download files 用于上传下载的web服务器
+- a database to keep track of metadata like user data, login info, file info. 存储用户，登录，文件信息的数据库
+- a storage system to store files. 存储系统用于存储文件。初始方案放在文件管理目录下，文件名与上传时候名字一致，每个用户一个命名空间namespace
+
+#### APIS
+
+- upload a file api
+- download a file api
+- get file revisions
+
+##### Upload a file
+
+- simple upload 小文件一次上传全部
+- resumable upload 大文件支持断点续传，防止网络抖动导致上传被打断。
+	- 发送上传大文件的请求，获取可以断点续传的上传链接
+	- 上传数据，并且监控上传状态
+	- 如果上传被打断，恢复下载
+
+```
+POST https://api.example.com/files/upload?uploadType=resumable
+- uploadType=resumable
+- data: Local file to be uploaded.
+```
+
+##### Download a file
+
+```
+GET https://api.example.com/files/download
+Params:
+- path: download file path.
+```
+
+##### Get file revisions
+
+```
+GET https://api.example.com/files/list_revisions
+Params:
+- path: The path to the file you want to get the revision history.
+- limit: The maximum number of revisions to return.
+```
+
+#### Move away from fingle server 从单服务器扩展到多服务器
+
+空间不足警告
+
+shard the data
+
+Amazon S3 for storage. “Amazon Simple Storage Service (Amazon S3) is an object storage service that offers
+industry-leading scalability, data availability, security, and performance”
+
+Amazon S3 supports same-region and cross-region replication. 冗余备份数据，防止数据丢失。
+A region is a geographic area where Amazon web services (AWS) have data centers.
+
+Metadata database: Move the database out of the server to avoid single point of failure.
+
+![](cloud-disk-scale-up-from-single-server.jpg)
+
+#### Sync conflicts
+
+strategy: the first version that gets processed wins, and the version that gets processed later receives a conflict
+先改的版本成本存盘，后改的用户会遇到系统报冲突。
+
+如何解决冲突？
+How can we resolve the conflict for user 2? Our system presents both copies of the same file: user 2’s local copy and
+the latest version from the server. User 2 has the option to merge both files or override one version with
+the other.
+保存两份修改，本地修改和服务器端修改。用户2可以选择合并修改，或者覆盖第一个修改。
+
+#### High-level design
+
+![](cloud-disk-high-level-design.jpg)
+
+##### Block servers:
+
+Block servers upload blocks to cloud storage. Block storage, referred to as block-level storage, is a technology to
+store data files on cloud-based environments. A file can be split into several blocks, each with a unique hash value,
+stored in our metadata database. Each block is treated as an independent object and stored in our storage system (S3).
+To reconstruct a file, blocks are joined in a particular order. As for the block size, we use Dropbox as a reference: it
+sets the maximal size of a block to 4MB
+块状存储服务器，大文件被分割为一个个小块，每个小块有自己的哈希码，每个小块存储在亚马逊对象存储服务器上，每个小块是独立的。
+把一个个小块按照原始顺序可以重新拼接成一个整的文件。块大小可以自定义，有的设置为 4MB
+
+##### Cloud storage: 云存储
+
+A file is split into smaller blocks and stored in cloud storage.
+
+##### Cold storage: 冷存储
+
+Cold storage is a computer system designed for storing inactive data, meaning files are not accessed for a long time.
+存储不活跃的数据。
+
+##### Load balancer:
+
+A load balancer evenly distributes requests among API servers.
+
+##### API servers:
+
+These are responsible for almost everything other than the uploading flow. 除了上传文件之外所有其他操作的 API
+
+- user authentication
+- managing user profile
+- updating file metadata
+
+##### Metadata database:
+
+It stores metadata of users, files, blocks, versions, etc.
+
+##### Metadata cache:
+
+Some of the metadata are cached for fast retrieval.
+
+##### Notification service:
+
+It is a publisher/subscriber system that allows data to be transferred from notification
+service to clients as certain events happen. 通知文件上传完成，文件被修改
+
+##### Offline backup queue:
+
+If a client is offline and cannot pull the latest file changes, the offline backup queue stores the info so changes will
+be synced when the client is online. 客户端下线之后，相应的修改会存在队列中，等待客户端上线之后进行同步。
+
+### Step 3 - Design deep dive
+
+#### Block servers
+
+Block server work flow:
+
+```
+-> split -> [block N] -> compress -> [zip files] -> encrypt -> [encrypted files] -> cloud storage
+```
+
+For large files that are updated regularly, sending the whole file on each update consumes a lot of bandwidth. Two
+optimizations are proposed to minimize the amount of network traffic being transmitted:
+大文件频繁更新是一个大挑战，如果每次更新整个文件需要消耗大量带宽。
+
+解决办法：
+
+- delta sync 只更新变化的部分，所以把文件分割成一个个小块。
+- compression 使用压缩算法 compression algorithms 压缩一个个块，可以减少数据占用的空间。
+	- gzip/bzip2 for text files
+
+![](block-server-delta-sync-changes.jpg)
+
+#### High consistency requirement
+
+provide strong consistency for metadata cache and database layers.
+
+Memory caches adopt an eventual consistency model by default 最终一致性
+
+Achieving strong consistency in a relational database is easy because it maintains the ACID (Atomicity, Consistency,
+Isolation, Durability) properties
+
+- 原子性： 要么全部执行成功，要么全部不执行，不存在中间状态。
+- 一致性： 数据库中的数据全部符合现实世界中的约束
+- 隔离性： 保证其它的状态转换不会影响到本次状态转换，两次 transaction 如果交替执行（例如读取修改同一个值）不互相影响
+- 持久性： 当现实世界的一个状态转换完成后，这个转换的结果将永久的保留，意味着该转换对应的数据库操作所修改的数据都应该在磁盘上保留下来
+
+#### Metadata database
+
+![](cloud-disk-metadata-database.jpg)
+Namespace: A namespace is the root directory of a user.
+
+File: File table stores everything related to the latest file.
+
+File_version: It stores version history of a file. Existing rows are
+read-only to keep the integrity of the file revision history. 只读保证文件历史版本的完整性
+
+Block: It stores everything related to a file block.
+A file of any version can be reconstructed by joining all the blocks in the correct order.
+文件的历史版本可以通过组装块的顺序进行重新构建。
+
+#### Upload flow
+
+包括两个流：一个是上传文件元数据流（快速），另一个是上传文件二进制数据流（耗时）
+
+##### Add file metadata.
+
+1. Client 1 sends a request to add the metadata of the new file. 上传元数据
+2. Store the new file metadata in metadata DB and change the file upload status to “pending.” 存储到元数据库中，并且修改上传状态为进行中。
+3. Notify the notification service that a new file is being added. 通知其他服务 "有文件添加中"
+4. The notification service notifies relevant clients (client 2) that a file is being uploaded.
+
+##### Upload files to cloud storage.
+
+1. Client 1 uploads the content of the file to block servers.
+2. Block servers chunk the files into blocks, compress, encrypt the blocks, and upload them to cloud storage.
+   块服务切割文件为块，并且压缩和加密块，最后上传块到云存储中。
+3. Once the file is uploaded, cloud storage triggers upload completion callback. The request is sent to API servers.
+   一旦上传完成，云存储服务触发回调服务，通知 API 服务 "文件上传已经完成"。
+4. File status changed to “uploaded” in Metadata DB.
+5. Notify the notification service that a file status is changed to “uploaded.” 通知文件已经上传完成。
+6. The notification service notifies relevant clients (client 2) that a file is fully uploaded.
+
+#### Download flow
+
+客户端如何知道其他客户端上传了或者修改了某个文件呢？
+
+- If client A is online while a file is changed by another client, notification service will inform client A that
+  changes are made somewhere so it needs to pull the latest data. 在线的客户端直接通知
+- If client A is offline while a file is changed by another client, data will be saved to the cache. When the offline
+  client is online again, it pulls the latest changes. 离线的客户就存储在缓存中，等到上线之后再通知。
+
+Once a client knows a file is changed, it first requests metadata via API servers, then downloads blocks to construct
+the file. 客户端知道文件被修改之后，首先他会请求文件元数据，获取更改了哪些数据块的信息，然后下载这些变化的数据块，以此来重新构建本地文件。
+
+1. Notification service informs client 2 that a file is changed somewhere else.
+2. Once client 2 knows that new updates are available, it sends a request to fetch metadata.
+3. API servers call metadata DB to fetch metadata of the changes.
+4. Metadata is returned to the API servers.
+5. Client 2 gets the metadata.
+6. Once the client receives the metadata, it sends requests to block servers to download blocks.
+7. Block servers first download blocks from cloud storage.
+8. Cloud storage returns blocks to the block servers.
+9. Client 2 downloads all the new blocks to reconstruct the file.
+
+#### Notification service
+
+To maintain file consistency, any mutation of a file performed locally needs to be informed to other clients to reduce
+conflicts. 为了维持文件的一致性，任何文件的修改都需要通知其他客户端。
+
+- Long polling. Dropbox uses long polling
+- WebSocket. WebSocket provides a persistent connection between the client and the server. Communication is
+  bi-directional.
+
+opt for long polling for the following two reasons: 选择定期拉取的策略的两个原因：
+
+- Communication for notification service is not bi-directional. The server sends information about file changes to the
+  client, but not vice versa. 通知是单向通信，而不是双向通信。
+- WebSocket is suited for real-time bi-directional communication such as a chat app. For Google Drive, notifications are
+  sent infrequently with no burst of data. websocket 适合聊天应用，网盘通知不频繁
+
+- With long polling, each client establishes a long poll connection to the notification service.
+- If changes to a file are detected, the client will close the long poll connection.
+- Closing the connection means a client must connect to the metadata server to download the latest changes.
+- After a response is received or connection timeout is reached, a client immediately sends a new request to keep the
+  connection open.
+
+#### Save storage space
+
+- De-duplicate data blocks. 删除重复的数据块，通过哈希值来判断是否重复
+- Adopt an intelligent data backup strategy.
+	- Set a limit: We can set a limit for the number of versions to store. If the limit is reached, the oldest version
+	  will be replaced with the new version.
+	- Keep valuable versions only:
+	- Moving infrequently used data to cold storage.
+
+#### Failure Handling
+
+- Load balancer failure: If a load balancer fails, the secondary would become active and pick up the traffic. Load
+  balancers usually monitor each other using a heartbeat, a periodic signal sent between load balancers. A load balancer
+  is considered as failed if it has not sent a heartbeat for some time. 负载均衡器掉线，用其他的负载均衡器替代。通过心跳彼此监测其他负载均衡器。
+- Block server failure: If a block server fails, other servers pick up unfinished or pending jobs. 块存储服务也得是集群方案。
+- Cloud storage failure: S3 buckets are replicated multiple times in different regions. If files are not available in
+  one region, they can be fetched from different regions.
+- API server failure: It is a stateless service. If an API server fails, the traffic is redirected to other API servers
+  by a load balancer. 无状态服务，可以无损迁移至其他 API 服务器。
+- Metadata cache failure: Metadata cache servers are replicated multiple times. If one node goes down, you can still
+  access other nodes to fetch data. We will bring up a new cache server to replace the failed one.
+- Metadata DB failure.
+	- Master down: If the master is down, promote one of the slaves to act as a new master and bring up a new slave
+	  node.
+	- Slave down: If a slave is down, you can use another slave for read operations and bring another database server to
+	  replace the failed one.
+- Notification service failure: Every online user keeps a long poll connection with the notification server. Thus, each
+  notification server is connected with many users. According to the Dropbox talk in 2012, over 1 million
+  connections are open per machine. If a server goes down, all the long poll connections are lost so clients must
+  reconnect to a different server. Even though one server can keep many open connections, it cannot reconnect all the
+  lost connections at once. Reconnecting with all the lost clients is a relatively slow process. 同时重连上千万个用户端的
+  polling 连接是一个耗费资源的任务
+- Offline backup queue failure: Queues are replicated multiple times. If one queue fails, consumers of the queue may
+  need to re-subscribe to the backup queue. 同步修改到下线用户的队列也要备份多个，防止队列挂掉。
+
+### Step 4 - Wrap up
+
+Another interesting evolution of the system is moving online/offline logic to a separate service. Let us call it
+presence service. By moving presence service out of notification servers, online/offline functionality can easily be
+integrated by other services.
+
+## Continue learning
+### Real-world systems
+````
+Facebook Timeline: Brought To You By The Power Of Denormalization: https://goo.gl/FCNrbm
+Scale at Facebook: https://goo.gl/NGTdCs
+Building Timeline: Scaling up to hold your life story:
+https://goo.gl/8p5wDV
+Erlang at Facebook (Facebook chat): https://goo.gl/zSLHrj
+Facebook Chat: https://goo.gl/qzSiWC
+Finding a needle in Haystack: Facebook’s photo storage:
+https://goo.gl/edj4FL
+Serving Facebook Multifeed: Efficiency, performance gains through redesign: https://goo.gl/adFVMQ
+Scaling Memcache at Facebook: https://goo.gl/rZiAhX
+TAO: Facebook’s Distributed Data Store for the Social Graph:
+https://goo.gl/Tk1DyH
+Amazon Architecture: https://goo.gl/k4feoW
+Dynamo: Amazon’s Highly Available Key-value Store:
+https://goo.gl/C7zxDL
+A 360 Degree View Of The Entire Netflix Stack:
+https://goo.gl/rYSDTz
+It’s All A/Bout Testing: The Netflix Experimentation Platform:
+https://goo.gl/agbA4K
+Netflix Recommendations: Beyond the 5 stars (Part 1):
+https://goo.gl/A4FkYi
+Netflix Recommendations: Beyond the 5 stars (Part 2):
+https://goo.gl/XNPMXm
+Google Architecture: https://goo.gl/dvkDiY
+The Google File System (Google Docs): https://goo.gl/xj5n9R
+Differential Synchronization (Google Docs): https://goo.gl/9zqG7x YouTube Architecture: https://goo.gl/mCPRUF
+Seattle Conference on Scalability: YouTube Scalability:
+https://goo.gl/dH3zYq
+Bigtable: A Distributed Storage System for Structured Data:
+https://goo.gl/6NaZca
+Instagram Architecture: 14 Million Users, Terabytes Of Photos, 100s Of Instances, Dozens Of Technologies: https://goo.gl/s1VcW5
+The Architecture Twitter Uses To Deal With 150M Active Users:
+https://goo.gl/EwvfRd
+Scaling Twitter: Making Twitter 10000 Percent Faster:
+https://goo.gl/nYGC1k
+Announcing Snowflake (Snowflake is a network service for generating unique ID numbers at high scale with some simple guarantees): https://goo.gl/GzVWYm
+Timelines at Scale: https://goo.gl/8KbqTy
+How Uber Scales Their Real-Time Market Platform:
+https://goo.gl/kGZuVy
+Scaling Pinterest: https://goo.gl/KtmjW3
+Pinterest Architecture Update: https://goo.gl/w6rRsf
+A Brief History of Scaling LinkedIn: https://goo.gl/8A1Pi8 Flickr Architecture: https://goo.gl/dWtgYa
+How We've Scaled Dropbox: https://goo.gl/NjBDtC
+The WhatsApp Architecture Facebook Bought For $19 Billion:
+https://bit.ly/2AHJnFn
+
+````
+### Company engineering blogs
+
+Here is a list of engineering blogs of well-known large companies and startups.
+````
+Airbnb: https://medium.com/airbnb-engineering Amazon: https://developer.amazon.com/blogs
+Asana: https://blog.asana.com/category/eng Atlassian: https://developer.atlassian.com/blog
+Bittorrent: http://engineering.bittorrent.com Cloudera: https://blog.cloudera.com
+Docker: https://blog.docker.com
+Dropbox: https://blogs.dropbox.com/tech eBay: http://www.ebaytechblog.com Facebook: https://code.facebook.com/posts
+GitHub: https://githubengineering.com Google: https://developers.googleblog.com Groupon: https://engineering.groupon.com
+Highscalability: http://highscalability.com Instacart: https://tech.instacart.com
+Instagram: https://engineering.instagram.com Linkedin: https://engineering.linkedin.com/blog
+Mixpanel: https://mixpanel.com/blog
+Netflix: https://medium.com/netflix-techblog Nextdoor: https://engblog.nextdoor.com
+PayPal: https://www.paypal-engineering.com Pinterest: https://engineering.pinterest.com
+Quora: https://engineering.quora.com
+
+Reddit: https://redditblog.com
+Salesforce: https://developer.salesforce.com/blogs/engineering
+Shopify: https://engineering.shopify.com
+Slack: https://slack.engineering
+Soundcloud: https://developers.soundcloud.com/blog
+Spotify: https://labs.spotify.com
+Stripe: https://stripe.com/blog/engineering
+System design primer: https://github.com/donnemartin/system- design-primer
+Twitter: https://blog.twitter.com/engineering/en_us.html Thumbtack: https://www.thumbtack.com/engineering
+Uber: http://eng.uber.com
+Yahoo: https://yahooeng.tumblr.com
+Yelp: https://engineeringblog.yelp.com
+Zoom: https://medium.com/zoom-developer-blog
+````
 ## References
 
 - "System Design Interview An Insider's Guide" by Alex Xu
